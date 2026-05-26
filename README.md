@@ -1,8 +1,8 @@
-# 🎮 游戏系统监控工具 | Game System Monitor
+# 🎮 win_status_checker
 
-专为游戏玩家设计的轻量级系统监控工具，实时监控网络、GPU、输入设备状态。
+专为游戏玩家设计的轻量级 Windows 系统状态监控工具，实时监控网络、GPU、输入设备状态。
 
-A lightweight system monitoring tool designed for gamers. Real-time monitoring of network, GPU, and input device status.
+A lightweight Windows system status monitoring tool designed for gamers. Real-time monitoring of network, GPU, and input device status.
 
 ---
 
