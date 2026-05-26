@@ -94,6 +94,8 @@ python run.py --no-web     # 仅监控报警 | Monitor & alert only
 - 监控频率 | Monitor interval
 - 报警阈值（延迟、丢包、抖动、温度等）| Alert thresholds
 - Web 端口 | Web port
+- Web 页面刷新间隔 | Web dashboard refresh interval
+- 是否启动时清空日志 | Clear logs on startup
 - 进程优先级 | Process priority
 - 启动检测参数（最低刷新率、最低内存）| Startup check params
 

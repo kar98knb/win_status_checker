@@ -76,12 +76,9 @@ def main():
     print("=" * 50)
     print("  安装完成！启动方式:")
     print()
-    if sys.platform == "win32":
-        print(f"    .venv\\Scripts\\python.exe main.py")
-        print(f"    .venv\\Scripts\\python.exe main.py --no-web")
-    else:
-        print(f"    .venv/bin/python main.py")
-        print(f"    .venv/bin/python main.py --no-web")
+    print("    python run.py")
+    print("    python run.py --no-web")
+    print("    python run.py --test")
     print("=" * 50)
 
 

@@ -33,6 +33,8 @@ from config import (
     LOG_DIR,
     LOG_MAX_SIZE_MB,
     LOG_BACKUP_COUNT,
+    CLEAR_LOGS_ON_START,
+    WEB_REFRESH_INTERVAL,
     PROCESS_PRIORITY,
 )
 from src.monitors.network_monitor import NetworkMonitor
@@ -49,6 +51,13 @@ def setup_logging():
     """配置日志系统"""
     log_path = PROJECT_ROOT / LOG_DIR
     log_path.mkdir(exist_ok=True)
+
+    if CLEAR_LOGS_ON_START:
+        for name in ("monitor.log", "alerts.log"):
+            try:
+                (log_path / name).unlink()
+            except FileNotFoundError:
+                pass
 
     # 主日志
     handler = RotatingFileHandler(
@@ -120,7 +129,10 @@ ws_clients: Set[WebSocket] = set()
 async def index():
     """返回监控面板页面"""
     html_path = Path(__file__).parent / "static" / "index.html"
-    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+    content = html_path.read_text(encoding="utf-8")
+    return HTMLResponse(
+        content=content.replace("{{WEB_REFRESH_INTERVAL}}", str(WEB_REFRESH_INTERVAL))
+    )
 
 
 @app.get("/api/status")

@@ -39,6 +39,10 @@ ALERT_THRESHOLDS = {
 LOG_DIR = "logs"
 LOG_MAX_SIZE_MB = 50
 LOG_BACKUP_COUNT = 5
+CLEAR_LOGS_ON_START = True
+
+# Web 页面刷新间隔（秒）
+WEB_REFRESH_INTERVAL = 2
 
 # 进程优先级：设为 "below_normal" 确保不抢游戏资源
 # 可选: "idle", "below_normal", "normal"

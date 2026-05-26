@@ -306,15 +306,24 @@
     </div>
 
     <footer>
-        游戏系统监控工具 | 进程优先级: 低于正常 | 刷新间隔: 2s
+        游戏系统监控工具 | 进程优先级: 低于正常 | 刷新间隔: {{WEB_REFRESH_INTERVAL}}s
     </footer>
 
     <script>
+        const WEB_REFRESH_INTERVAL = {{WEB_REFRESH_INTERVAL}};
+        
         // ============ WebSocket 连接 ============
         let ws = null;
         let reconnectTimer = null;
         const alerts = [];
         const MAX_ALERTS = 50;
+
+        function fetchStatus() {
+            fetch('/api/status')
+                .then(res => res.json())
+                .then(data => updateUI(data))
+                .catch(() => {});
+        }
 
         function connect() {
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -575,8 +584,10 @@
             `).join('');
         }
 
+        // 定时刷新（WebSocket 作为主通道，定时轮询作为补充）
+        setInterval(fetchStatus, WEB_REFRESH_INTERVAL * 1000);
+        
         // 启动连接
         connect();
-    </script>
 </body>
 </html>
