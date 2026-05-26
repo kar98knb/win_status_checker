@@ -41,6 +41,19 @@ def activate_venv():
 
 
 if __name__ == "__main__":
+    # Windows 终端 UTF-8 支持
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # 设置控制台代码页为 UTF-8
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+        # 重新配置 stdout/stderr 编码
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     activate_venv()
 
     # 处理 --test 参数：运行测试套件

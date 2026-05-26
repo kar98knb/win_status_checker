@@ -14,6 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests import test_network_monitor
 from tests import test_gpu_monitor
 from tests import test_driver_monitor
+from tests import test_network_jitter
+from tests import test_system_monitor
+from tests import test_startup_checks
 
 
 def run_module_tests(module, module_name: str) -> tuple:
@@ -53,6 +56,9 @@ def main():
         (test_network_monitor, "网络监控"),
         (test_gpu_monitor, "GPU 监控"),
         (test_driver_monitor, "驱动监控"),
+        (test_network_jitter, "网络抖动/链路闪断"),
+        (test_system_monitor, "系统资源监控"),
+        (test_startup_checks, "启动检测"),
     ]
 
     start_time = time.time()

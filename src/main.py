@@ -38,7 +38,9 @@ from config import (
 from src.monitors.network_monitor import NetworkMonitor
 from src.monitors.gpu_monitor import GPUMonitor
 from src.monitors.driver_monitor import DriverMonitor
+from src.monitors.system_monitor import SystemMonitor
 from src.alerter import Alerter
+from src.startup_checks import run_startup_checks
 
 
 # ============ 日志配置 ============
@@ -103,7 +105,9 @@ app = FastAPI(title="游戏监控面板", docs_url=None, redoc_url=None)
 latest_data = {
     "network": {},
     "gpu": {},
+    "system": {},
     "drivers": {},
+    "startup_checks": {},
     "timestamp": 0,
 }
 data_lock = threading.Lock()
@@ -160,6 +164,7 @@ def monitor_loop(logger: logging.Logger):
     network_mon = NetworkMonitor()
     gpu_mon = GPUMonitor()
     driver_mon = DriverMonitor()
+    system_mon = SystemMonitor()
     alerter = Alerter(cooldown_seconds=60)
 
     driver_last_check = 0
@@ -169,9 +174,12 @@ def monitor_loop(logger: logging.Logger):
 
     while True:
         try:
+            # 采集网络、GPU、系统资源（每次都采）
             network_status = network_mon.collect()
             gpu_status = gpu_mon.collect()
+            system_status = system_mon.collect()
 
+            # 驱动状态检查频率较低（WMI 查询较重）
             now = time.time()
             if now - driver_last_check >= driver_check_interval:
                 driver_status = driver_mon.collect()
@@ -179,9 +187,11 @@ def monitor_loop(logger: logging.Logger):
             else:
                 driver_status = None
 
+            # 更新全局数据
             data = {
                 "network": network_status.to_dict(),
                 "gpu": gpu_status.to_dict(),
+                "system": system_status.to_dict(),
                 "timestamp": time.time(),
             }
             if driver_status:
@@ -190,10 +200,12 @@ def monitor_loop(logger: logging.Logger):
             with data_lock:
                 latest_data["network"] = data["network"]
                 latest_data["gpu"] = data["gpu"]
+                latest_data["system"] = data["system"]
                 latest_data["timestamp"] = data["timestamp"]
                 if "drivers" in data:
                     latest_data["drivers"] = data["drivers"]
 
+            # 检查报警
             alerter.check_and_alert(
                 network_status,
                 gpu_status,
@@ -201,6 +213,41 @@ def monitor_loop(logger: logging.Logger):
                 ALERT_THRESHOLDS,
             )
 
+            # 系统资源报警
+            if system_status.memory_percent > 90:
+                alerter.alert(
+                    "memory_high",
+                    "内存不足",
+                    f"内存使用 {system_status.memory_percent:.0f}%，"
+                    f"可用 {system_status.memory_available_gb:.1f}GB",
+                    "warning"
+                )
+            if system_status.cpu_throttled:
+                alerter.alert(
+                    "cpu_throttled",
+                    "CPU 降频",
+                    f"CPU 频率 {system_status.cpu_freq_mhz:.0f}MHz "
+                    f"(最大 {system_status.cpu_freq_max_mhz:.0f}MHz)，可能过热降频",
+                    "warning"
+                )
+            if system_status.has_resource_hog:
+                hog_names = [p.name for p in system_status.top_processes
+                             if p.cpu_percent > 15]
+                alerter.alert(
+                    "resource_hog",
+                    "后台进程抢资源",
+                    f"检测到高占用后台进程: {', '.join(hog_names[:3])}",
+                    "info"
+                )
+            if network_status.jitter_ms > 30:
+                alerter.alert(
+                    "high_jitter",
+                    "网络抖动大",
+                    f"抖动 {network_status.jitter_ms:.0f}ms，可能导致游戏卡顿",
+                    "warning"
+                )
+
+            # 广播给 WebSocket 客户端
             try:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(broadcast_to_clients(latest_data.copy()))
@@ -242,6 +289,18 @@ def main():
 
     monitor_thread = threading.Thread(target=monitor_loop, args=(logger,), daemon=True)
     monitor_thread.start()
+
+    # 启动时一次性检测
+    logger.info("执行启动检测...")
+    startup_result = run_startup_checks()
+    with data_lock:
+        latest_data["startup_checks"] = startup_result.to_dict()
+
+    if startup_result.warnings:
+        print(f"  ⚠ 启动检测发现 {len(startup_result.warnings)} 个问题:")
+        for w in startup_result.warnings:
+            print(f"    - {w}")
+        print()
 
     if args.no_web:
         print(f"\n{'='*50}")
