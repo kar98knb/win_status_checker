@@ -3,7 +3,6 @@
 监控网络、GPU、鼠标/键盘驱动状态
 提供 Web GUI 实时查看 + 异常报警
 
-启动方式: python main.py
 访问地址: http://localhost:8870
 """
 
@@ -17,6 +16,10 @@ import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from typing import Set
+
+# 确保项目根目录在 sys.path 中（从 src/ 往上一级）
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 import psutil
 import uvicorn
@@ -42,7 +45,7 @@ from src.alerter import Alerter
 
 def setup_logging():
     """配置日志系统"""
-    log_path = Path(LOG_DIR)
+    log_path = PROJECT_ROOT / LOG_DIR
     log_path.mkdir(exist_ok=True)
 
     # 主日志
@@ -88,7 +91,6 @@ def set_low_priority():
             p.nice(psutil.IDLE_PRIORITY_CLASS)
         elif PROCESS_PRIORITY == "below_normal":
             p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-        # "normal" 不需要设置
     except Exception:
         pass
 
@@ -113,7 +115,7 @@ ws_clients: Set[WebSocket] = set()
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """返回监控面板页面"""
-    html_path = Path(__file__).parent / "src" / "static" / "index.html"
+    html_path = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
@@ -130,12 +132,9 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     ws_clients.add(ws)
     try:
-        # 立即发送当前状态
         with data_lock:
             await ws.send_json(latest_data)
-        # 保持连接，等待客户端断开
         while True:
-            # 接收心跳或等待断开
             await ws.receive_text()
     except WebSocketDisconnect:
         pass
@@ -170,11 +169,9 @@ def monitor_loop(logger: logging.Logger):
 
     while True:
         try:
-            # 采集网络和 GPU（每次都采）
             network_status = network_mon.collect()
             gpu_status = gpu_mon.collect()
 
-            # 驱动状态检查频率较低（WMI 查询较重）
             now = time.time()
             if now - driver_last_check >= driver_check_interval:
                 driver_status = driver_mon.collect()
@@ -182,7 +179,6 @@ def monitor_loop(logger: logging.Logger):
             else:
                 driver_status = None
 
-            # 更新全局数据
             data = {
                 "network": network_status.to_dict(),
                 "gpu": gpu_status.to_dict(),
@@ -198,7 +194,6 @@ def monitor_loop(logger: logging.Logger):
                 if "drivers" in data:
                     latest_data["drivers"] = data["drivers"]
 
-            # 检查报警
             alerter.check_and_alert(
                 network_status,
                 gpu_status,
@@ -206,7 +201,6 @@ def monitor_loop(logger: logging.Logger):
                 ALERT_THRESHOLDS,
             )
 
-            # 广播给 WebSocket 客户端
             try:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(broadcast_to_clients(latest_data.copy()))
@@ -246,12 +240,10 @@ def main():
     logger.info(f"进程优先级: {PROCESS_PRIORITY}")
     logger.info("=" * 50)
 
-    # 启动监控线程
     monitor_thread = threading.Thread(target=monitor_loop, args=(logger,), daemon=True)
     monitor_thread.start()
 
     if args.no_web:
-        # 仅监控模式，主线程保持运行
         print(f"\n{'='*50}")
         print(f"  监控已启动（无 Web 服务）")
         print(f"  报警通知正常工作")
@@ -264,7 +256,6 @@ def main():
         except KeyboardInterrupt:
             print("\n监控已停止。")
     else:
-        # 完整模式，启动 Web 服务
         print(f"\n{'='*50}")
         print(f"  游戏监控面板已启动！")
         print(f"  打开浏览器访问: http://localhost:{WEB_PORT}")
