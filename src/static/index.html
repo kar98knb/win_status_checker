@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>游戏监控面板</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', -apple-system, sans-serif;
+            background: #0a0e17;
+            color: #e0e6ed;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
+            border-radius: 12px;
+            border: 1px solid #21262d;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #58a6ff;
+            margin-bottom: 8px;
+        }
+
+        .header .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #8b949e;
+        }
+
+        .header .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #3fb950;
+            animation: pulse 2s infinite;
+        }
+
+        .header .dot.disconnected {
+            background: #f85149;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 12px;
+            padding: 24px;
+            transition: border-color 0.3s;
+        }
+
+        .card:hover {
+            border-color: #388bfd;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #58a6ff;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-title .icon {
+            font-size: 20px;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #21262d;
+        }
+
+        .metric:last-child {
+            border-bottom: none;
+        }
+
+        .metric-label {
+            color: #8b949e;
+            font-size: 14px;
+        }
+
+        .metric-value {
+            font-size: 16px;
+            font-weight: 600;
+            font-family: 'Consolas', monospace;
+        }
+
+        .metric-value.good { color: #3fb950; }
+        .metric-value.warning { color: #d29922; }
+        .metric-value.danger { color: #f85149; }
+        .metric-value.neutral { color: #e0e6ed; }
+
+        .progress-bar {
+            width: 120px;
+            height: 6px;
+            background: #21262d;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+
+        .progress-bar .fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease, background 0.3s;
+        }
+
+        .device-list {
+            margin-top: 8px;
+        }
+
+        .device-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #0d1117;
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+
+        .device-item .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .device-item .status-dot.ok { background: #3fb950; }
+        .device-item .status-dot.error { background: #f85149; }
+
+        .alert-log {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 12px;
+        }
+
+        .alert-item {
+            padding: 8px 12px;
+            margin-bottom: 4px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-family: 'Consolas', monospace;
+        }
+
+        .alert-item.warning { background: rgba(210, 153, 34, 0.1); border-left: 3px solid #d29922; }
+        .alert-item.critical { background: rgba(248, 81, 73, 0.1); border-left: 3px solid #f85149; }
+        .alert-item.info { background: rgba(56, 139, 253, 0.1); border-left: 3px solid #388bfd; }
+
+        .speed-display {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .speed-display .arrow-up { color: #f85149; }
+        .speed-display .arrow-down { color: #3fb950; }
+
+        footer {
+            text-align: center;
+            margin-top: 30px;
+            color: #484f58;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎮 游戏系统监控面板</h1>
+        <div class="status-indicator">
+            <span class="dot" id="ws-dot"></span>
+            <span id="ws-status">连接中...</span>
+            <span style="margin-left: 16px;" id="update-time">--</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- 网络状态卡片 -->
+        <div class="card">
+            <div class="card-title"><span class="icon">🌐</span> 网络状态</div>
+            <div class="metric">
+                <span class="metric-label">连接状态</span>
+                <span class="metric-value" id="net-status">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">延迟</span>
+                <span class="metric-value" id="net-latency">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">丢包率</span>
+                <span class="metric-value" id="net-loss">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">网速</span>
+                <div class="speed-display">
+                    <span class="arrow-up">↑</span>
+                    <span class="metric-value neutral" id="net-upload">--</span>
+                    <span class="arrow-down">↓</span>
+                    <span class="metric-value neutral" id="net-download">--</span>
+                </div>
+            </div>
+            <div class="metric">
+                <span class="metric-label">活跃连接</span>
+                <span class="metric-value neutral" id="net-connections">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">适配器</span>
+                <span class="metric-value neutral" id="net-adapter" style="font-size:12px; max-width:200px; text-align:right;">--</span>
+            </div>
+        </div>
+
+        <!-- GPU 状态卡片 -->
+        <div class="card">
+            <div class="card-title"><span class="icon">🖥️</span> GPU 状态</div>
+            <div class="metric">
+                <span class="metric-label">显卡</span>
+                <span class="metric-value neutral" id="gpu-name" style="font-size:12px; max-width:220px; text-align:right;">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">GPU 使用率</span>
+                <div>
+                    <span class="metric-value" id="gpu-usage">--</span>
+                    <div class="progress-bar"><div class="fill" id="gpu-usage-bar"></div></div>
+                </div>
+            </div>
+            <div class="metric">
+                <span class="metric-label">显存</span>
+                <div>
+                    <span class="metric-value" id="gpu-memory">--</span>
+                    <div class="progress-bar"><div class="fill" id="gpu-memory-bar"></div></div>
+                </div>
+            </div>
+            <div class="metric">
+                <span class="metric-label">温度</span>
+                <span class="metric-value" id="gpu-temp">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">风扇转速</span>
+                <span class="metric-value neutral" id="gpu-fan">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">功耗</span>
+                <span class="metric-value neutral" id="gpu-power">--</span>
+            </div>
+            <div class="metric">
+                <span class="metric-label">驱动版本</span>
+                <span class="metric-value neutral" id="gpu-driver">--</span>
+            </div>
+        </div>
+
+        <!-- 驱动状态卡片 -->
+        <div class="card">
+            <div class="card-title"><span class="icon">🖱️</span> 输入设备状态</div>
+            <div class="metric">
+                <span class="metric-label">鼠标状态</span>
+                <span class="metric-value" id="mouse-status">--</span>
+            </div>
+            <div class="device-list" id="mouse-list"></div>
+            <div class="metric" style="margin-top: 12px;">
+                <span class="metric-label">键盘状态</span>
+                <span class="metric-value" id="keyboard-status">--</span>
+            </div>
+            <div class="device-list" id="keyboard-list"></div>
+        </div>
+
+        <!-- 报警日志卡片 -->
+        <div class="card">
+            <div class="card-title"><span class="icon">🔔</span> 最近报警</div>
+            <div class="alert-log" id="alert-log">
+                <div class="alert-item info">等待数据...</div>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        游戏系统监控工具 | 进程优先级: 低于正常 | 刷新间隔: 2s
+    </footer>
+
+    <script>
+        // ============ WebSocket 连接 ============
+        let ws = null;
+        let reconnectTimer = null;
+        const alerts = [];
+        const MAX_ALERTS = 50;
+
+        function connect() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+            ws.onopen = () => {
+                document.getElementById('ws-dot').className = 'dot';
+                document.getElementById('ws-status').textContent = '已连接';
+                if (reconnectTimer) {
+                    clearInterval(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                // 心跳
+                setInterval(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send('ping');
+                    }
+                }, 30000);
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    updateUI(data);
+                } catch (e) {
+                    console.error('解析数据失败:', e);
+                }
+            };
+
+            ws.onclose = () => {
+                document.getElementById('ws-dot').className = 'dot disconnected';
+                document.getElementById('ws-status').textContent = '已断开，重连中...';
+                if (!reconnectTimer) {
+                    reconnectTimer = setInterval(connect, 3000);
+                }
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        // ============ UI 更新 ============
+        function updateUI(data) {
+            // 更新时间
+            if (data.timestamp) {
+                const time = new Date(data.timestamp * 1000);
+                document.getElementById('update-time').textContent =
+                    `最后更新: ${time.toLocaleTimeString('zh-CN')}`;
+            }
+
+            // 网络
+            if (data.network) {
+                updateNetwork(data.network);
+            }
+
+            // GPU
+            if (data.gpu) {
+                updateGPU(data.gpu);
+            }
+
+            // 驱动
+            if (data.drivers) {
+                updateDrivers(data.drivers);
+            }
+        }
+
+        function updateNetwork(net) {
+            // 连接状态
+            const statusEl = document.getElementById('net-status');
+            if (net.is_connected) {
+                statusEl.textContent = '已连接';
+                statusEl.className = 'metric-value good';
+            } else {
+                statusEl.textContent = '断开';
+                statusEl.className = 'metric-value danger';
+                addAlert('网络连接断开', 'critical');
+            }
+
+            // 延迟
+            const latencyEl = document.getElementById('net-latency');
+            if (net.latency_ms >= 0) {
+                latencyEl.textContent = `${net.latency_ms} ms`;
+                latencyEl.className = 'metric-value ' + getLatencyClass(net.latency_ms);
+            } else {
+                latencyEl.textContent = '超时';
+                latencyEl.className = 'metric-value danger';
+            }
+
+            // 丢包
+            const lossEl = document.getElementById('net-loss');
+            lossEl.textContent = `${net.packet_loss_percent}%`;
+            lossEl.className = 'metric-value ' + (
+                net.packet_loss_percent === 0 ? 'good' :
+                net.packet_loss_percent <= 5 ? 'warning' : 'danger'
+            );
+            if (net.packet_loss_percent > 5) {
+                addAlert(`丢包率 ${net.packet_loss_percent}%`, 'warning');
+            }
+
+            // 网速
+            document.getElementById('net-upload').textContent = formatSpeed(net.bytes_sent_per_sec);
+            document.getElementById('net-download').textContent = formatSpeed(net.bytes_recv_per_sec);
+
+            // 连接数
+            const connEl = document.getElementById('net-connections');
+            connEl.textContent = net.active_connections >= 0 ? net.active_connections : 'N/A';
+
+            // 适配器
+            document.getElementById('net-adapter').textContent = net.adapter_name || '--';
+        }
+
+        function updateGPU(gpu) {
+            document.getElementById('gpu-name').textContent = gpu.gpu_name || '未检测到';
+
+            if (!gpu.is_available) {
+                document.getElementById('gpu-usage').textContent = 'N/A';
+                document.getElementById('gpu-memory').textContent = 'N/A';
+                document.getElementById('gpu-temp').textContent = 'N/A';
+                document.getElementById('gpu-fan').textContent = 'N/A';
+                document.getElementById('gpu-power').textContent = 'N/A';
+                document.getElementById('gpu-driver').textContent = gpu.driver_version || 'N/A';
+                return;
+            }
+
+            // GPU 使用率
+            const usageEl = document.getElementById('gpu-usage');
+            if (gpu.gpu_usage_percent >= 0) {
+                usageEl.textContent = `${gpu.gpu_usage_percent}%`;
+                usageEl.className = 'metric-value ' + getUsageClass(gpu.gpu_usage_percent);
+                setProgressBar('gpu-usage-bar', gpu.gpu_usage_percent);
+            } else {
+                usageEl.textContent = 'N/A';
+                usageEl.className = 'metric-value neutral';
+            }
+
+            // 显存
+            const memEl = document.getElementById('gpu-memory');
+            memEl.textContent = `${gpu.memory_used_mb}/${gpu.memory_total_mb} MB (${gpu.memory_percent}%)`;
+            memEl.className = 'metric-value ' + getUsageClass(gpu.memory_percent);
+            setProgressBar('gpu-memory-bar', gpu.memory_percent);
+
+            // 温度
+            const tempEl = document.getElementById('gpu-temp');
+            if (gpu.temperature_celsius > 0) {
+                tempEl.textContent = `${gpu.temperature_celsius}°C`;
+                tempEl.className = 'metric-value ' + getTempClass(gpu.temperature_celsius);
+                if (gpu.temperature_celsius > 85) {
+                    addAlert(`GPU 温度 ${gpu.temperature_celsius}°C`, 'critical');
+                }
+            } else {
+                tempEl.textContent = 'N/A';
+                tempEl.className = 'metric-value neutral';
+            }
+
+            // 风扇
+            document.getElementById('gpu-fan').textContent =
+                gpu.fan_speed_percent > 0 ? `${gpu.fan_speed_percent}%` : 'N/A';
+
+            // 功耗
+            document.getElementById('gpu-power').textContent =
+                gpu.power_draw_watts > 0 ? `${gpu.power_draw_watts} W` : 'N/A';
+
+            // 驱动
+            document.getElementById('gpu-driver').textContent = gpu.driver_version || 'N/A';
+        }
+
+        function updateDrivers(drivers) {
+            // 鼠标
+            const mouseStatusEl = document.getElementById('mouse-status');
+            mouseStatusEl.textContent = drivers.all_mice_ok ? '全部正常' : '存在异常';
+            mouseStatusEl.className = 'metric-value ' + (drivers.all_mice_ok ? 'good' : 'danger');
+
+            const mouseList = document.getElementById('mouse-list');
+            mouseList.innerHTML = '';
+            (drivers.mice || []).forEach(m => {
+                mouseList.innerHTML += `
+                    <div class="device-item">
+                        <span class="status-dot ${m.error_code === 0 ? 'ok' : 'error'}"></span>
+                        <span>${m.name}</span>
+                        <span style="margin-left:auto; color:#8b949e; font-size:11px;">${m.status}</span>
+                    </div>`;
+            });
+
+            // 键盘
+            const kbStatusEl = document.getElementById('keyboard-status');
+            kbStatusEl.textContent = drivers.all_keyboards_ok ? '全部正常' : '存在异常';
+            kbStatusEl.className = 'metric-value ' + (drivers.all_keyboards_ok ? 'good' : 'danger');
+
+            const kbList = document.getElementById('keyboard-list');
+            kbList.innerHTML = '';
+            (drivers.keyboards || []).forEach(k => {
+                kbList.innerHTML += `
+                    <div class="device-item">
+                        <span class="status-dot ${k.error_code === 0 ? 'ok' : 'error'}"></span>
+                        <span>${k.name}</span>
+                        <span style="margin-left:auto; color:#8b949e; font-size:11px;">${k.status}</span>
+                    </div>`;
+            });
+
+            if (!drivers.all_mice_ok) {
+                addAlert('鼠标驱动异常', 'critical');
+            }
+            if (!drivers.all_keyboards_ok) {
+                addAlert('键盘驱动异常', 'critical');
+            }
+        }
+
+        // ============ 辅助函数 ============
+        function formatSpeed(bytesPerSec) {
+            if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`;
+            if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`;
+            return `${(bytesPerSec / 1024 / 1024).toFixed(1)} MB/s`;
+        }
+
+        function getLatencyClass(ms) {
+            if (ms <= 30) return 'good';
+            if (ms <= 80) return 'neutral';
+            if (ms <= 150) return 'warning';
+            return 'danger';
+        }
+
+        function getUsageClass(percent) {
+            if (percent <= 60) return 'good';
+            if (percent <= 85) return 'warning';
+            return 'danger';
+        }
+
+        function getTempClass(temp) {
+            if (temp <= 65) return 'good';
+            if (temp <= 80) return 'warning';
+            return 'danger';
+        }
+
+        function setProgressBar(id, percent) {
+            const bar = document.getElementById(id);
+            bar.style.width = `${Math.min(percent, 100)}%`;
+            if (percent <= 60) bar.style.background = '#3fb950';
+            else if (percent <= 85) bar.style.background = '#d29922';
+            else bar.style.background = '#f85149';
+        }
+
+        function addAlert(message, level) {
+            const now = new Date().toLocaleTimeString('zh-CN');
+            const key = `${message}-${Math.floor(Date.now() / 60000)}`; // 1分钟内去重
+
+            // 去重
+            if (alerts.length > 0 && alerts[0].key === key) return;
+
+            alerts.unshift({ time: now, message, level, key });
+            if (alerts.length > MAX_ALERTS) alerts.pop();
+
+            const logEl = document.getElementById('alert-log');
+            logEl.innerHTML = alerts.map(a => `
+                <div class="alert-item ${a.level}">
+                    [${a.time}] ${a.message}
+                </div>
+            `).join('');
+        }
+
+        // 启动连接
+        connect();
+    </script>
+</body>
+</html>
