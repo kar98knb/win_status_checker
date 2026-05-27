@@ -6,7 +6,7 @@
 import subprocess
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List
 
 logger = logging.getLogger("startup_checks")
 
@@ -37,56 +37,36 @@ class StartupCheckResult:
 
 
 def run_startup_checks(min_refresh_hz: int = 120, min_memory_gb: float = 8.0) -> StartupCheckResult:
-    """
-    执行所有启动时一次性检测
-
-    Args:
-        min_refresh_hz: 期望的最低刷新率（低于此值报警）
-        min_memory_gb: 期望的最低内存（低于此值报警）
-    """
     result = StartupCheckResult()
-
     _check_power_plan(result)
     _check_display_refresh(result, min_refresh_hz)
     _check_pending_reboot(result)
     _check_total_memory(result, min_memory_gb)
-
-    # 汇总日志
     if result.warnings:
         for w in result.warnings:
             logger.warning(f"[启动检测] {w}")
     else:
         logger.info("[启动检测] 所有项目正常")
-
     return result
 
 
 def _check_power_plan(result: StartupCheckResult):
-    """检测当前电源计划"""
     try:
         output = subprocess.run(
             ["powercfg", "/getactivescheme"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if output.returncode == 0:
             line = output.stdout.strip()
-            # 输出格式: "电源方案 GUID: xxx  (高性能)" 或 "Power Scheme GUID: xxx  (High performance)"
             if "(" in line and ")" in line:
                 plan_name = line.split("(")[-1].rstrip(")")
                 result.power_plan = plan_name
-
-                # 判断是否为高性能/卓越性能
                 high_perf_keywords = [
                     "高性能", "卓越性能", "high performance",
                     "ultimate performance", "游戏", "game",
                 ]
-                result.power_plan_ok = any(
-                    kw in plan_name.lower() for kw in high_perf_keywords
-                )
-
+                result.power_plan_ok = any(kw in plan_name.lower() for kw in high_perf_keywords)
                 if not result.power_plan_ok:
                     result.warnings.append(
                         f"电源计划为「{plan_name}」，建议切换到「高性能」以获得最佳游戏体验"
@@ -96,25 +76,20 @@ def _check_power_plan(result: StartupCheckResult):
 
 
 def _check_display_refresh(result: StartupCheckResult, min_hz: int):
-    """检测显示器刷新率"""
     try:
-        # 通过 WMI 获取当前刷新率
         ps_cmd = (
             "Get-CimInstance Win32_VideoController | "
             "Select-Object -First 1 -ExpandProperty CurrentRefreshRate"
         )
         output = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if output.returncode == 0 and output.stdout.strip():
             hz = int(output.stdout.strip())
             result.display_refresh_rate = hz
             result.display_refresh_ok = hz >= min_hz
-
             if not result.display_refresh_ok:
                 result.warnings.append(
                     f"显示器刷新率为 {hz}Hz，低于 {min_hz}Hz，可能未开启高刷"
@@ -124,38 +99,30 @@ def _check_display_refresh(result: StartupCheckResult, min_hz: int):
 
 
 def _check_pending_reboot(result: StartupCheckResult):
-    """检测是否有待重启的 Windows 更新"""
     try:
-        # 检查注册表中的 RebootRequired 标记
         ps_cmd = (
             "Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
             "\\WindowsUpdate\\Auto Update\\RebootRequired'"
         )
         output = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if output.returncode == 0:
             result.pending_reboot = output.stdout.strip().lower() == "true"
             if result.pending_reboot:
-                result.warnings.append(
-                    "系统有待重启的更新，可能随时弹窗打断游戏"
-                )
+                result.warnings.append("系统有待重启的更新，可能随时弹窗打断游戏")
     except Exception as e:
         logger.debug(f"更新状态检测失败: {e}")
 
 
 def _check_total_memory(result: StartupCheckResult, min_gb: float):
-    """检测系统总内存"""
     try:
         import psutil
         mem = psutil.virtual_memory()
         result.total_memory_gb = mem.total / (1024 ** 3)
         result.memory_ok = result.total_memory_gb >= min_gb
-
         if not result.memory_ok:
             result.warnings.append(
                 f"系统内存 {result.total_memory_gb:.1f}GB，低于推荐的 {min_gb}GB"

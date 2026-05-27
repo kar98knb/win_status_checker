@@ -39,7 +39,7 @@ ALERT_THRESHOLDS = {
 LOG_DIR = "logs"
 LOG_MAX_SIZE_MB = 50
 LOG_BACKUP_COUNT = 5
-CLEAR_LOGS_ON_START = True
+LOG_RETAIN_DAYS = 7              # 日志保留天数，超过自动清理
 
 # Web 页面刷新间隔（秒）
 WEB_REFRESH_INTERVAL = 2

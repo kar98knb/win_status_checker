@@ -17,6 +17,9 @@ from tests import test_driver_monitor
 from tests import test_network_jitter
 from tests import test_system_monitor
 from tests import test_startup_checks
+from tests import test_alerter
+from tests import test_snapshot
+from tests import test_replay
 
 
 def run_module_tests(module, module_name: str) -> tuple:
@@ -59,6 +62,9 @@ def main():
         (test_network_jitter, "网络抖动/链路闪断"),
         (test_system_monitor, "系统资源监控"),
         (test_startup_checks, "启动检测"),
+        (test_alerter, "报警模块"),
+        (test_snapshot, "快照/崩溃检测"),
+        (test_replay, "录制数据回放"),
     ]
 
     start_time = time.time()

@@ -33,7 +33,7 @@ from config import (
     LOG_DIR,
     LOG_MAX_SIZE_MB,
     LOG_BACKUP_COUNT,
-    CLEAR_LOGS_ON_START,
+    LOG_RETAIN_DAYS,
     WEB_REFRESH_INTERVAL,
     PROCESS_PRIORITY,
 )
@@ -41,27 +41,37 @@ from src.monitors.network_monitor import NetworkMonitor
 from src.monitors.gpu_monitor import GPUMonitor
 from src.monitors.driver_monitor import DriverMonitor
 from src.monitors.system_monitor import SystemMonitor
-from src.alerter import Alerter
-from src.startup_checks import run_startup_checks
+from src.alerts.alerter import Alerter
+from src.alerts.snapshot import save_snapshot, check_abnormal_exit, clear_snapshot
+from src.checks.startup_checks import run_startup_checks
 
 
 # ============ 日志配置 ============
 
 def setup_logging():
-    """配置日志系统"""
-    log_path = PROJECT_ROOT / LOG_DIR
-    log_path.mkdir(exist_ok=True)
+    """
+    配置日志系统
+    目录结构:
+        logs/
+        ├── last_snapshot.json      # 一次性：快照文件
+        ├── crash_report.json       # 一次性：崩溃报告
+        └── 20260527_143000/        # 每次启动一个时间戳文件夹
+            ├── monitor.log
+            └── alerts.log
+    """
+    from datetime import datetime
 
-    if CLEAR_LOGS_ON_START:
-        for name in ("monitor.log", "alerts.log"):
-            try:
-                (log_path / name).unlink()
-            except FileNotFoundError:
-                pass
+    log_root = PROJECT_ROOT / LOG_DIR
+    log_root.mkdir(exist_ok=True)
+
+    # 每次启动创建时间戳子目录
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_dir = log_root / timestamp
+    session_dir.mkdir(exist_ok=True)
 
     # 主日志
     handler = RotatingFileHandler(
-        log_path / "monitor.log",
+        session_dir / "monitor.log",
         maxBytes=LOG_MAX_SIZE_MB * 1024 * 1024,
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
@@ -72,7 +82,7 @@ def setup_logging():
 
     # 报警专用日志
     alert_handler = RotatingFileHandler(
-        log_path / "alerts.log",
+        session_dir / "alerts.log",
         maxBytes=LOG_MAX_SIZE_MB * 1024 * 1024,
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
@@ -89,7 +99,30 @@ def setup_logging():
     alert_logger = logging.getLogger("alerter")
     alert_logger.addHandler(alert_handler)
 
+    # 清理过期日志目录
+    _cleanup_old_logs(log_root)
+
     return logging.getLogger("main")
+
+
+def _cleanup_old_logs(log_root: Path):
+    """清理超过保留天数的旧日志目录"""
+    from datetime import datetime, timedelta
+    import shutil
+
+    cutoff = datetime.now() - timedelta(days=LOG_RETAIN_DAYS)
+
+    for item in log_root.iterdir():
+        if not item.is_dir():
+            continue
+        # 只处理时间戳格式的目录（YYYYMMDD_HHMMSS）
+        try:
+            dir_time = datetime.strptime(item.name, "%Y%m%d_%H%M%S")
+            if dir_time < cutoff:
+                shutil.rmtree(item)
+        except ValueError:
+            # 不是时间戳格式的目录，跳过
+            pass
 
 
 # ============ 设置进程优先级 ============
@@ -128,7 +161,7 @@ ws_clients: Set[WebSocket] = set()
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """返回监控面板页面"""
-    html_path = Path(__file__).parent / "static" / "index.html"
+    html_path = Path(__file__).parent / "web" / "static" / "index.html"
     content = html_path.read_text(encoding="utf-8")
     return HTMLResponse(
         content=content.replace("{{WEB_REFRESH_INTERVAL}}", str(WEB_REFRESH_INTERVAL))
@@ -267,6 +300,9 @@ def monitor_loop(logger: logging.Logger):
             except Exception:
                 pass
 
+            # 快照落盘（确保卡死时数据可追溯）
+            save_snapshot(latest_data.copy())
+
         except Exception as e:
             logger.error(f"监控循环异常: {e}", exc_info=True)
 
@@ -289,6 +325,19 @@ def main():
 
     logger = setup_logging()
     set_low_priority()
+
+    # 检查上次是否异常退出（卡死/崩溃）
+    crash_report = check_abnormal_exit(max_gap_seconds=MONITOR_INTERVAL * 15)
+    if crash_report:
+        logger.critical("=" * 50)
+        logger.critical("检测到上次异常退出（可能卡死/崩溃）")
+        logger.critical(f"  上次快照时间距今: {crash_report['gap_seconds']}s")
+        logger.critical(f"  {crash_report['conclusion']}")
+        logger.critical("  详细报告: logs/crash_report.json")
+        logger.critical("=" * 50)
+        print(f"\n  ⚠ 检测到上次异常退出！")
+        print(f"    {crash_report['conclusion']}")
+        print(f"    详细报告: logs/crash_report.json\n")
 
     mode = "仅监控" if args.no_web else "完整（监控 + Web）"
     logger.info("=" * 50)
@@ -325,6 +374,7 @@ def main():
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
+            clear_snapshot()  # 正常退出，清除快照
             print("\n监控已停止。")
     else:
         print(f"\n{'='*50}")
@@ -333,12 +383,15 @@ def main():
         print(f"  按 Ctrl+C 停止")
         print(f"{'='*50}\n")
 
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=WEB_PORT,
-            log_level="warning",
-        )
+        try:
+            uvicorn.run(
+                app,
+                host="0.0.0.0",
+                port=WEB_PORT,
+                log_level="warning",
+            )
+        finally:
+            clear_snapshot()  # 正常退出，清除快照
 
 
 if __name__ == "__main__":

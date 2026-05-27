@@ -8,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.startup_checks import (
+from src.checks.startup_checks import (
     run_startup_checks,
     StartupCheckResult,
     _check_power_plan,
