@@ -52,7 +52,7 @@ python run.py              # 完整模式 | Full mode (monitor + web)
 python run.py --no-web     # 仅监控报警 | Monitor & alert only
 ```
 
-然后打开浏览器访问 | Then open browser: **http://localhost:8870**
+然后打开浏览器访问 | Then open browser: **http://localhost:8870**（端口被占用时自动递增 | Auto-increments if port is in use）
 
 ---
 

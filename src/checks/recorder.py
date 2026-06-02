@@ -17,11 +17,12 @@ RECORDINGS_DIR = Path(__file__).parent.parent.parent / "tests" / "recordings"
 class Recorder:
     """录制器 - 在监控循环中录制原始 API 数据"""
 
-    def __init__(self, session_name: Optional[str] = None):
-        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    def __init__(self, session_name: Optional[str] = None, output_dir: Optional[Path] = None):
+        target_dir = output_dir or RECORDINGS_DIR
+        target_dir.mkdir(parents=True, exist_ok=True)
         if session_name is None:
             session_name = time.strftime("%Y%m%d_%H%M%S")
-        self._session_file = RECORDINGS_DIR / f"session_{session_name}.jsonl"
+        self._session_file = target_dir / f"session_{session_name}.jsonl"
         self._sample_count = 0
 
     def record_sample(self, sample: dict):

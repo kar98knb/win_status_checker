@@ -41,18 +41,8 @@ def activate_venv():
 
 
 if __name__ == "__main__":
-    # Windows 终端 UTF-8 支持
-    if sys.platform == "win32":
-        try:
-            import ctypes
-            # 设置控制台代码页为 UTF-8
-            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
-            ctypes.windll.kernel32.SetConsoleCP(65001)
-        except Exception:
-            pass
-        # 重新配置 stdout/stderr 编码
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    from src.compat import setup_console
+    setup_console()
 
     activate_venv()
 
@@ -61,29 +51,6 @@ if __name__ == "__main__":
         sys.argv = [sys.argv[0]]  # 清理参数，避免传给测试
         from tests.run_all import main as run_tests
         run_tests()
-    elif "--record" in sys.argv:
-        # 录制模式：采集原始 API 数据
-        sys.argv.remove("--record")
-        from src.checks.recorder import Recorder, collect_raw_sample
-        label = ""
-        for i, arg in enumerate(sys.argv):
-            if arg == "--label" and i + 1 < len(sys.argv):
-                label = sys.argv[i + 1]
-                break
-        recorder = Recorder()
-        print(f"录制模式启动，文件: {recorder.file_path}")
-        print(f"标签: {label or '(无)'}")
-        print("每 2 秒采集一次，Ctrl+C 停止\n")
-        try:
-            while True:
-                sample = collect_raw_sample(label=label)
-                recorder.record_sample(sample)
-                print(f"  [{sample['_seq']}] 已录制", end="\r")
-                import time as _t
-                _t.sleep(2)
-        except KeyboardInterrupt:
-            print(f"\n\n录制完成，共 {sample['_seq'] + 1} 条样本")
-            print(f"文件: {recorder.file_path}")
     else:
         from src.main import main
         main()

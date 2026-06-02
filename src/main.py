@@ -3,7 +3,7 @@
 监控网络、GPU、鼠标/键盘驱动状态
 提供 Web GUI 实时查看 + 异常报警
 
-访问地址: http://localhost:8870
+访问地址: http://localhost:8870（端口被占用时自动递增）
 """
 
 import os
@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse
 from config import (
     MONITOR_INTERVAL,
     WEB_PORT,
+    WEB_PORT_RANGE,
     ALERT_THRESHOLDS,
     LOG_DIR,
     LOG_MAX_SIZE_MB,
@@ -206,16 +207,20 @@ async def broadcast_to_clients(data: dict):
 
 def monitor_loop(logger: logging.Logger):
     """后台监控循环（在独立线程运行）"""
+    from src.checks.recorder import Recorder, collect_raw_sample
+
     network_mon = NetworkMonitor()
     gpu_mon = GPUMonitor()
     driver_mon = DriverMonitor()
     system_mon = SystemMonitor()
     alerter = Alerter(cooldown_seconds=60)
+    recorder = Recorder()
 
     driver_last_check = 0
     driver_check_interval = ALERT_THRESHOLDS.get("driver_check_interval", 30)
 
     logger.info("监控循环已启动")
+    logger.info(f"录制文件: {recorder.file_path}")
 
     while True:
         try:
@@ -303,10 +308,36 @@ def monitor_loop(logger: logging.Logger):
             # 快照落盘（确保卡死时数据可追溯）
             save_snapshot(latest_data.copy())
 
+            # 自动录制原始 API 数据（用于回放测试）
+            try:
+                sample = collect_raw_sample()
+                recorder.record_sample(sample)
+            except Exception:
+                pass
+
         except Exception as e:
             logger.error(f"监控循环异常: {e}", exc_info=True)
 
         time.sleep(MONITOR_INTERVAL)
+
+
+# ============ 端口探测 ============
+
+def _find_available_port(start_port: int, max_range: int) -> int:
+    """从 start_port 开始探测可用端口，最多尝试 max_range 个"""
+    import socket
+
+    for offset in range(max_range):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("0.0.0.0", port))
+                return port
+        except OSError:
+            continue
+
+    # 全部被占用，回退到首选端口（让 uvicorn 报错）
+    return start_port
 
 
 # ============ 启动 ============
@@ -377,9 +408,14 @@ def main():
             clear_snapshot()  # 正常退出，清除快照
             print("\n监控已停止。")
     else:
+        # 端口探测：首选端口被占用时自动递增
+        actual_port = _find_available_port(WEB_PORT, WEB_PORT_RANGE)
+
         print(f"\n{'='*50}")
         print(f"  游戏监控面板已启动！")
-        print(f"  打开浏览器访问: http://localhost:{WEB_PORT}")
+        print(f"  打开浏览器访问: http://localhost:{actual_port}")
+        if actual_port != WEB_PORT:
+            print(f"  (首选端口 {WEB_PORT} 被占用，使用 {actual_port})")
         print(f"  按 Ctrl+C 停止")
         print(f"{'='*50}\n")
 
@@ -387,7 +423,7 @@ def main():
             uvicorn.run(
                 app,
                 host="0.0.0.0",
-                port=WEB_PORT,
+                port=actual_port,
                 log_level="warning",
             )
         finally:

@@ -7,8 +7,9 @@
 # 推荐 2-3 秒，对游戏几乎无影响
 MONITOR_INTERVAL = 2
 
-# Web 服务端口
+# Web 服务端口（首选，被占用时自动递增寻找可用端口）
 WEB_PORT = 8870
+WEB_PORT_RANGE = 10  # 最多尝试 8870-8879
 
 # 报警阈值
 ALERT_THRESHOLDS = {
