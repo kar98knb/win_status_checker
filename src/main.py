@@ -42,9 +42,11 @@ from src.monitors.network_monitor import NetworkMonitor
 from src.monitors.gpu_monitor import GPUMonitor
 from src.monitors.driver_monitor import DriverMonitor
 from src.monitors.system_monitor import SystemMonitor
+from src.monitors.process_focus import ProcessFocusMonitor
 from src.alerts.alerter import Alerter
 from src.alerts.snapshot import save_snapshot, check_abnormal_exit, clear_snapshot
 from src.checks.startup_checks import run_startup_checks
+from src.checks.event_log import check_system_events
 
 
 # ============ 日志配置 ============
@@ -149,6 +151,7 @@ latest_data = {
     "network": {},
     "gpu": {},
     "system": {},
+    "process_focus": {},
     "drivers": {},
     "startup_checks": {},
     "timestamp": 0,
@@ -207,20 +210,17 @@ async def broadcast_to_clients(data: dict):
 
 def monitor_loop(logger: logging.Logger):
     """后台监控循环（在独立线程运行）"""
-    from src.checks.recorder import Recorder, collect_raw_sample
-
     network_mon = NetworkMonitor()
     gpu_mon = GPUMonitor()
     driver_mon = DriverMonitor()
     system_mon = SystemMonitor()
+    focus_mon = ProcessFocusMonitor()
     alerter = Alerter(cooldown_seconds=60)
-    recorder = Recorder()
 
     driver_last_check = 0
     driver_check_interval = ALERT_THRESHOLDS.get("driver_check_interval", 30)
 
     logger.info("监控循环已启动")
-    logger.info(f"录制文件: {recorder.file_path}")
 
     while True:
         try:
@@ -228,6 +228,7 @@ def monitor_loop(logger: logging.Logger):
             network_status = network_mon.collect()
             gpu_status = gpu_mon.collect()
             system_status = system_mon.collect()
+            focus_status = focus_mon.collect()
 
             # 驱动状态检查频率较低（WMI 查询较重）
             now = time.time()
@@ -242,6 +243,7 @@ def monitor_loop(logger: logging.Logger):
                 "network": network_status.to_dict(),
                 "gpu": gpu_status.to_dict(),
                 "system": system_status.to_dict(),
+                "process_focus": focus_status.to_dict(),
                 "timestamp": time.time(),
             }
             if driver_status:
@@ -251,6 +253,7 @@ def monitor_loop(logger: logging.Logger):
                 latest_data["network"] = data["network"]
                 latest_data["gpu"] = data["gpu"]
                 latest_data["system"] = data["system"]
+                latest_data["process_focus"] = data["process_focus"]
                 latest_data["timestamp"] = data["timestamp"]
                 if "drivers" in data:
                     latest_data["drivers"] = data["drivers"]
@@ -296,6 +299,22 @@ def monitor_loop(logger: logging.Logger):
                     f"抖动 {network_status.jitter_ms:.0f}ms，可能导致游戏卡顿",
                     "warning"
                 )
+            # 基线突变报警（替代固定阈值，更贴近实际体感）
+            if network_status.latency_anomaly:
+                alerter.alert(
+                    "latency_spike",
+                    "网络延迟突增",
+                    f"延迟 {network_status.latency_ms:.0f}ms，"
+                    f"基线 {network_status.latency_baseline:.0f}ms",
+                    "warning"
+                )
+            if network_status.jitter_anomaly:
+                alerter.alert(
+                    "jitter_spike",
+                    "网络抖动突增",
+                    f"抖动 {network_status.jitter_ms:.0f}ms，网络可能不稳定",
+                    "warning"
+                )
 
             # 广播给 WebSocket 客户端
             try:
@@ -307,13 +326,6 @@ def monitor_loop(logger: logging.Logger):
 
             # 快照落盘（确保卡死时数据可追溯）
             save_snapshot(latest_data.copy())
-
-            # 自动录制原始 API 数据（用于回放测试）
-            try:
-                sample = collect_raw_sample()
-                recorder.record_sample(sample)
-            except Exception:
-                pass
 
         except Exception as e:
             logger.error(f"监控循环异常: {e}", exc_info=True)
@@ -369,6 +381,18 @@ def main():
         print(f"\n  ⚠ 检测到上次异常退出！")
         print(f"    {crash_report['conclusion']}")
         print(f"    详细报告: logs/crash_report.json\n")
+
+    # 回溯 Windows 系统事件日志
+    event_result = check_system_events(hours_back=24)
+    if event_result.events:
+        with data_lock:
+            latest_data["event_log"] = event_result.to_dict()
+        if event_result.has_unexpected_shutdown:
+            print(f"  ⚠ 事件日志发现意外关机/卡死记录！")
+        if event_result.has_gpu_tdr:
+            print(f"  ⚠ 事件日志发现 GPU 驱动崩溃(TDR)记录！")
+        if event_result.events and not event_result.has_unexpected_shutdown and not event_result.has_gpu_tdr:
+            print(f"  ℹ 过去24h有 {len(event_result.events)} 条系统异常事件（详见日志）")
 
     mode = "仅监控" if args.no_web else "完整（监控 + Web）"
     logger.info("=" * 50)

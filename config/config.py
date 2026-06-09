@@ -48,3 +48,20 @@ WEB_REFRESH_INTERVAL = 2
 # 进程优先级：设为 "below_normal" 确保不抢游戏资源
 # 可选: "idle", "below_normal", "normal"
 PROCESS_PRIORITY = "below_normal"
+
+# 进程焦点白名单（这些进程高占用是正常的，不会被锁定为焦点）
+FOCUS_WHITELIST = {
+    # 浏览器
+    "chrome.exe", "msedge.exe", "firefox.exe", "opera.exe", "brave.exe",
+    # 通讯
+    "discord.exe", "telegram.exe", "wechat.exe", "qq.exe", "teams.exe",
+    # 系统
+    "explorer.exe", "dwm.exe", "csrss.exe", "svchost.exe", "system",
+    "searchhost.exe", "runtimebroker.exe", "shellexperiencehost.exe",
+    # 开发工具
+    "code.exe", "devenv.exe", "idea64.exe", "pycharm64.exe",
+    # 媒体
+    "spotify.exe", "vlc.exe",
+    # 本项目
+    "python.exe", "python3.exe", "python3.13.exe", "pythonw.exe",
+}

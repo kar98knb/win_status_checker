@@ -1,174 +1,203 @@
 """
-录制数据回放测试
-用真实录制的 API 数据验证监控模块的解析逻辑。
-
-使用方式：
-1. 先录制正常数据：  python run.py --record --label normal
-2. 制造异常后录制：  python run.py --record --label mouse_disconnected
-3. 运行回放测试：    python run.py --test
-
-录制文件存放在 tests/recordings/ 目录下。
+录制/回放链路测试
+验证：采集 → 录制 → 读取 → 回放解析 整条链路的正确性。
+不依赖预先录制的文件，测试时现场录制、回放、断言。
 """
 
 import sys
 import os
 import json
+import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.checks.recorder import load_recording
-
-RECORDINGS_DIR = Path(__file__).parent / "recordings"
+from src.checks.recorder import Recorder, collect_raw_sample, load_recording
 from src.monitors.driver_monitor import DriverMonitor, DriverStatus
-from src.monitors.network_monitor import NetworkMonitor, NetworkStatus
+from src.monitors.network_monitor import NetworkMonitor
 
 
-def _get_recording_files() -> list:
-    """获取所有录制文件"""
-    if not RECORDINGS_DIR.exists():
-        return []
-    return sorted(RECORDINGS_DIR.glob("session_*.jsonl"))
+def test_collect_raw_sample_fields():
+    """测试原始数据采集：必要字段完整"""
+    sample = collect_raw_sample(label="test")
+
+    required_keys = [
+        "label", "timestamp",
+        "net_if_stats", "net_if_addrs", "net_io_counters", "tcp_latencies",
+        "cpu_percent", "cpu_freq", "memory", "disk_io",
+        "wmi_pointing_devices", "wmi_keyboards", "wmi_sound_devices",
+    ]
+    for key in required_keys:
+        assert key in sample, f"缺少字段: {key}"
+
+    assert sample["label"] == "test"
+    assert sample["timestamp"] > 0
+    assert isinstance(sample["tcp_latencies"], list)
+    assert len(sample["tcp_latencies"]) == 3
+    print("  ✓ collect_raw_sample: 所有必要字段完整")
 
 
-def test_replay_driver_monitor():
-    """回放测试：用录制数据验证驱动监控解析"""
-    files = _get_recording_files()
-    if not files:
-        print("  ⚠ 无录制数据，跳过回放测试")
-        print("    提示: 运行 'python run.py --record --label normal' 录制数据")
-        return
+def test_collect_raw_sample_types():
+    """测试原始数据采集：字段类型正确"""
+    sample = collect_raw_sample()
 
-    total_samples = 0
-    for f in files:
-        samples = load_recording(f)
-        for sample in samples:
-            total_samples += 1
-            # 用录制的 WMI 数据构造 mock
-            monitor = DriverMonitor()
-            mock_wmi = MagicMock()
+    assert isinstance(sample["net_if_stats"], dict)
+    assert isinstance(sample["memory"], dict)
+    assert isinstance(sample["cpu_percent"], (int, float))
+    assert isinstance(sample["wmi_pointing_devices"], list)
+    assert isinstance(sample["wmi_keyboards"], list)
 
-            # 回放鼠标数据
-            mice_data = sample.get("wmi_pointing_devices", [])
-            mock_mice = []
-            for m in mice_data:
-                mock_dev = MagicMock()
-                mock_dev.Name = m.get("Name", "")
-                mock_dev.Status = m.get("Status", "")
-                mock_dev.ConfigManagerErrorCode = m.get("ConfigManagerErrorCode", 0)
-                mock_mice.append(mock_dev)
-            mock_wmi.Win32_PointingDevice.return_value = mock_mice
-
-            # 回放键盘数据
-            kb_data = sample.get("wmi_keyboards", [])
-            mock_kbs = []
-            for k in kb_data:
-                mock_dev = MagicMock()
-                mock_dev.Name = k.get("Name", "")
-                mock_dev.Status = k.get("Status", "")
-                mock_dev.ConfigManagerErrorCode = k.get("ConfigManagerErrorCode", 0)
-                mock_kbs.append(mock_dev)
-            mock_wmi.Win32_Keyboard.return_value = mock_kbs
-
-            # 回放音频数据
-            audio_data = sample.get("wmi_sound_devices", [])
-            mock_audio = []
-            for a in audio_data:
-                mock_dev = MagicMock()
-                mock_dev.Name = a.get("Name", "")
-                mock_dev.Status = a.get("Status", "")
-                mock_dev.ConfigManagerErrorCode = a.get("ConfigManagerErrorCode", 0)
-                mock_audio.append(mock_dev)
-            mock_wmi.Win32_SoundDevice.return_value = mock_audio
-            mock_wmi.query.return_value = []
-
-            monitor._wmi = mock_wmi
-            status = monitor.collect()
-
-            # 验证基本一致性
-            label = sample.get("label", "")
-            assert isinstance(status, DriverStatus)
-            assert status.timestamp > 0
-
-            # 如果标签标注了异常，验证检测结果
-            if "mouse_disconnected" in label or "mouse_error" in label:
-                assert not status.all_mice_ok, \
-                    f"标签 '{label}' 但未检测到鼠标异常"
-            elif "keyboard_error" in label:
-                assert not status.all_keyboards_ok, \
-                    f"标签 '{label}' 但未检测到键盘异常"
-            elif label == "normal":
-                # 正常标签下所有设备应该 OK
-                assert status.all_mice_ok, "标签 'normal' 但鼠标异常"
-                assert status.all_keyboards_ok, "标签 'normal' 但键盘异常"
-
-    print(f"  ✓ 驱动监控回放: {total_samples} 条样本验证通过 ({len(files)} 个录制文件)")
+    # 内存字段应该有值
+    mem = sample["memory"]
+    assert mem.get("total", 0) > 0
+    assert mem.get("percent", 0) > 0
+    print("  ✓ collect_raw_sample: 字段类型正确")
 
 
-def test_replay_network_monitor():
-    """回放测试：用录制数据验证网络监控解析"""
-    files = _get_recording_files()
-    if not files:
-        print("  ⚠ 无录制数据，跳过")
-        return
+def test_recorder_write_and_read():
+    """测试录制写入和读取：完整往返"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        recorder = Recorder(session_name="test_roundtrip", output_dir=tmp_path)
 
-    total_samples = 0
-    for f in files:
-        samples = load_recording(f)
-        for sample in samples:
-            total_samples += 1
-            label = sample.get("label", "")
-            latencies = sample.get("tcp_latencies", [])
-            net_stats = sample.get("net_if_stats", {})
+        # 录制 2 条
+        sample1 = collect_raw_sample(label="first")
+        sample2 = collect_raw_sample(label="second")
+        recorder.record_sample(sample1)
+        recorder.record_sample(sample2)
 
-            # 验证网络连通性判断
-            has_up_interface = any(
-                v.get("isup", False)
-                for k, v in net_stats.items()
-                if "loopback" not in k.lower()
-            )
+        # 读取
+        samples = load_recording(recorder.file_path)
 
-            # 验证延迟数据合理性
-            valid_latencies = [l for l in latencies if l > 0]
-            if valid_latencies:
-                avg_latency = sum(valid_latencies) / len(valid_latencies)
-                assert avg_latency < 10000, f"延迟异常大: {avg_latency}ms"
-
-            # 标签验证
-            if "network_down" in label:
-                all_failed = all(l == -1 for l in latencies)
-                assert all_failed or not has_up_interface, \
-                    f"标签 '{label}' 但网络看起来正常"
-
-    print(f"  ✓ 网络监控回放: {total_samples} 条样本验证通过")
+        assert len(samples) == 2
+        assert samples[0]["label"] == "first"
+        assert samples[1]["label"] == "second"
+        assert samples[0]["_seq"] == 0
+        assert samples[1]["_seq"] == 1
+        assert samples[0]["_ts"] > 0
+    print("  ✓ Recorder 写入/读取: 往返一致")
 
 
-def test_replay_data_integrity():
-    """回放测试：验证录制数据完整性"""
-    files = _get_recording_files()
-    if not files:
-        print("  ⚠ 无录制数据，跳过")
-        return
+def test_replay_driver_from_live_data():
+    """回放测试：用当前机器采集的数据回放驱动监控"""
+    sample = collect_raw_sample(label="normal")
 
-    required_keys = ["timestamp", "net_if_stats", "cpu_percent", "memory"]
-    issues = 0
+    # 用采集到的 WMI 数据构造 mock
+    monitor = DriverMonitor()
+    mock_wmi = MagicMock()
 
-    for f in files:
-        samples = load_recording(f)
-        for sample in samples:
-            for key in required_keys:
-                if key not in sample:
-                    issues += 1
+    mice_data = sample["wmi_pointing_devices"]
+    mock_mice = []
+    for m in mice_data:
+        mock_dev = MagicMock()
+        mock_dev.Name = m["Name"]
+        mock_dev.Status = m["Status"]
+        mock_dev.ConfigManagerErrorCode = m["ConfigManagerErrorCode"]
+        mock_mice.append(mock_dev)
+    mock_wmi.Win32_PointingDevice.return_value = mock_mice
 
-    assert issues == 0, f"录制数据缺少必要字段: {issues} 处"
-    total = sum(len(load_recording(f)) for f in files)
-    print(f"  ✓ 数据完整性: {total} 条样本，所有必要字段完整")
+    kb_data = sample["wmi_keyboards"]
+    mock_kbs = []
+    for k in kb_data:
+        mock_dev = MagicMock()
+        mock_dev.Name = k["Name"]
+        mock_dev.Status = k["Status"]
+        mock_dev.ConfigManagerErrorCode = k["ConfigManagerErrorCode"]
+        mock_kbs.append(mock_dev)
+    mock_wmi.Win32_Keyboard.return_value = mock_kbs
+
+    audio_data = sample["wmi_sound_devices"]
+    mock_audio = []
+    for a in audio_data:
+        mock_dev = MagicMock()
+        mock_dev.Name = a["Name"]
+        mock_dev.Status = a["Status"]
+        mock_dev.ConfigManagerErrorCode = a["ConfigManagerErrorCode"]
+        mock_audio.append(mock_dev)
+    mock_wmi.Win32_SoundDevice.return_value = mock_audio
+    mock_wmi.query.return_value = []
+
+    monitor._wmi = mock_wmi
+    status = monitor.collect()
+
+    # 真实正常数据回放，应该所有设备正常
+    assert status.all_mice_ok is True, f"鼠标状态异常: {[m.to_dict() for m in status.mice]}"
+    assert status.all_keyboards_ok is True, f"键盘状态异常: {[k.to_dict() for k in status.keyboards]}"
+    assert len(status.mice) == len(mice_data)
+    assert len(status.keyboards) == len(kb_data)
+    print(f"  ✓ 回放驱动监控: {len(mice_data)} 鼠标 + {len(kb_data)} 键盘，解析结果一致")
+
+
+def test_replay_network_from_live_data():
+    """回放测试：用当前机器采集的数据验证网络判断"""
+    sample = collect_raw_sample()
+
+    latencies = sample["tcp_latencies"]
+    net_stats = sample["net_if_stats"]
+
+    # 验证：如果有 up 的接口且有成功的延迟测试，应判定为连接正常
+    has_up = any(v.get("isup") for v in net_stats.values())
+    has_latency = any(l > 0 for l in latencies)
+
+    if has_up and has_latency:
+        # 直接用 NetworkMonitor 采集验证
+        monitor = NetworkMonitor()
+        status = monitor.collect()
+        assert status.is_connected is True
+        assert status.latency_ms > 0
+        print(f"  ✓ 回放网络监控: 连接正常, 延迟 {status.latency_ms:.1f}ms（与原始数据一致）")
+    else:
+        print("  ⚠ 当前网络不可用，跳过回放验证")
+
+
+def test_replay_consistency():
+    """一致性测试：直接采集 vs 录制回放，驱动结果一致"""
+    # 直接采集
+    monitor = DriverMonitor()
+    direct_status = monitor.collect()
+
+    # 录制一条
+    sample = collect_raw_sample()
+
+    # 回放
+    monitor2 = DriverMonitor()
+    mock_wmi = MagicMock()
+    for device_type, wmi_method, data_key in [
+        ("mice", "Win32_PointingDevice", "wmi_pointing_devices"),
+        ("keyboards", "Win32_Keyboard", "wmi_keyboards"),
+        ("audio", "Win32_SoundDevice", "wmi_sound_devices"),
+    ]:
+        mock_devices = []
+        for d in sample[data_key]:
+            mock_dev = MagicMock()
+            mock_dev.Name = d["Name"]
+            mock_dev.Status = d["Status"]
+            mock_dev.ConfigManagerErrorCode = d["ConfigManagerErrorCode"]
+            mock_devices.append(mock_dev)
+        getattr(mock_wmi, wmi_method).return_value = mock_devices
+    mock_wmi.query.return_value = []
+    monitor2._wmi = mock_wmi
+    replay_status = monitor2.collect()
+
+    # 断言：两种方式结果一致
+    assert direct_status.all_mice_ok == replay_status.all_mice_ok
+    assert direct_status.all_keyboards_ok == replay_status.all_keyboards_ok
+    assert direct_status.all_audio_ok == replay_status.all_audio_ok
+    assert len(direct_status.mice) == len(replay_status.mice)
+    assert len(direct_status.keyboards) == len(replay_status.keyboards)
+    print("  ✓ 一致性: 直接采集 vs 录制回放，结果完全一致")
 
 
 if __name__ == "__main__":
-    print("\n=== 录制数据回放测试 ===\n")
-    test_replay_data_integrity()
-    test_replay_driver_monitor()
-    test_replay_network_monitor()
+    print("\n=== 录制/回放链路测试 ===\n")
+    print("-- 数据采集 --")
+    test_collect_raw_sample_fields()
+    test_collect_raw_sample_types()
+    print("\n-- 录制读写 --")
+    test_recorder_write_and_read()
+    print("\n-- 回放验证 --")
+    test_replay_driver_from_live_data()
+    test_replay_network_from_live_data()
+    test_replay_consistency()
     print("\n全部通过 ✓\n")

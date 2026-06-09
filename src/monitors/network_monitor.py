@@ -1,14 +1,94 @@
 """
 网络状态监控模块
 监控：网络连通性、延迟、丢包率、抖动(Jitter)、上下行速率
+包含基线异常检测：基于历史数据的自适应报警
 """
 
 import time
+import math
 import socket
 import psutil
 from dataclasses import dataclass, field
 from typing import Optional, List
 from collections import deque
+
+
+class BaselineDetector:
+    """
+    基线异常检测器
+    用滑动窗口统计均值和标准差，检测突变。
+    """
+
+    def __init__(self, window_size: int = 60, warmup_count: int = 10,
+                 sigma_threshold: float = 3.0, max_sane_value: float = 500.0):
+        """
+        Args:
+            window_size: 滑动窗口大小（保留多少个样本）
+            warmup_count: 最少需要多少样本才开始检测
+            sigma_threshold: 偏离基线几倍标准差算异常
+            max_sane_value: 基线合理性上限（超过此值的基线不采纳）
+        """
+        self._window: deque = deque(maxlen=window_size)
+        self._warmup_count = warmup_count
+        self._sigma_threshold = sigma_threshold
+        self._max_sane_value = max_sane_value
+
+    def add_sample(self, value: float):
+        """添加一个样本"""
+        if value >= 0:  # 忽略无效值（如 -1 表示超时）
+            self._window.append(value)
+
+    @property
+    def is_ready(self) -> bool:
+        """基线是否已就绪（积累够样本）"""
+        return len(self._window) >= self._warmup_count
+
+    @property
+    def mean(self) -> float:
+        """当前基线均值"""
+        if not self._window:
+            return 0.0
+        return sum(self._window) / len(self._window)
+
+    @property
+    def std(self) -> float:
+        """当前标准差"""
+        if len(self._window) < 2:
+            return 0.0
+        avg = self.mean
+        variance = sum((x - avg) ** 2 for x in self._window) / len(self._window)
+        return math.sqrt(variance)
+
+    @property
+    def is_baseline_sane(self) -> bool:
+        """基线是否合理（没被异常数据污染）"""
+        return self.mean <= self._max_sane_value
+
+    def is_anomaly(self, value: float) -> bool:
+        """
+        判断一个值是否偏离基线（异常）
+
+        Returns:
+            True = 异常突变，False = 正常波动
+        """
+        if not self.is_ready:
+            return False
+        if not self.is_baseline_sane:
+            return False
+        if value < 0:
+            return False
+
+        std = self.std
+        if std < 1.0:
+            # 标准差太小（数据极度稳定），用固定偏移量
+            return value > self.mean + 50
+        return value > self.mean + self._sigma_threshold * std
+
+    def get_deviation(self, value: float) -> float:
+        """返回偏离基线的倍数（几个 sigma）"""
+        if not self.is_ready or self.std < 0.1:
+            return 0.0
+        return (value - self.mean) / self.std
 
 
 @dataclass
@@ -26,6 +106,10 @@ class NetworkStatus:
     dns_ok: bool = False
     link_down_count: int = 0        # 链路闪断次数（累计）
     nic_errors_delta: int = 0       # 网卡错误包增量（本周期）
+    # 基线检测
+    latency_baseline: float = 0.0   # 延迟基线均值
+    latency_anomaly: bool = False   # 延迟是否突变
+    jitter_anomaly: bool = False    # 抖动是否突变
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -42,6 +126,9 @@ class NetworkStatus:
             "dns_ok": self.dns_ok,
             "link_down_count": self.link_down_count,
             "nic_errors_delta": self.nic_errors_delta,
+            "latency_baseline": round(self.latency_baseline, 1),
+            "latency_anomaly": self.latency_anomaly,
+            "jitter_anomaly": self.jitter_anomaly,
             "timestamp": self.timestamp,
         }
 
@@ -72,6 +159,13 @@ class NetworkMonitor:
         self._error_deltas = {"errin": 0, "errout": 0, "dropin": 0, "dropout": 0}
         self._active_nic: Optional[str] = None
         self._init_error_baseline()
+        # 基线异常检测器（窗口 60 个样本 ≈ 2 分钟，需要 10 个样本 ≈ 20s 预热）
+        self._latency_baseline = BaselineDetector(
+            window_size=60, warmup_count=10, sigma_threshold=3.0, max_sane_value=500.0
+        )
+        self._jitter_baseline = BaselineDetector(
+            window_size=60, warmup_count=10, sigma_threshold=3.0, max_sane_value=200.0
+        )
 
     def collect(self) -> NetworkStatus:
         """采集一次网络状态"""
@@ -98,7 +192,25 @@ class NetworkMonitor:
         # 5. 网卡错误包检测
         self._collect_nic_errors(status)
 
+        # 6. 基线异常检测
+        self._check_baseline(status)
+
         return status
+
+    def _check_baseline(self, status: NetworkStatus):
+        """基于历史基线检测延迟/抖动突变"""
+        # 喂入样本
+        if status.latency_ms > 0:
+            self._latency_baseline.add_sample(status.latency_ms)
+        if status.jitter_ms >= 0:
+            self._jitter_baseline.add_sample(status.jitter_ms)
+
+        # 基线均值（供 UI 展示）
+        status.latency_baseline = self._latency_baseline.mean
+
+        # 突变检测
+        status.latency_anomaly = self._latency_baseline.is_anomaly(status.latency_ms)
+        status.jitter_anomaly = self._jitter_baseline.is_anomaly(status.jitter_ms)
 
     def _init_error_baseline(self):
         """初始化网卡错误包基线"""
