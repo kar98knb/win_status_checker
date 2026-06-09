@@ -27,7 +27,6 @@ else:
 def main():
     print("=" * 50)
     print("  游戏系统监控工具 - 环境安装")
-    print("  Game System Monitor - Setup")
     print("=" * 50)
     print()
 
@@ -74,11 +73,11 @@ def main():
     # 完成提示
     print()
     print("=" * 50)
-    print("  安装完成！启动方式:")
+    print("  安装完成！")
     print()
-    print("    python run.py")
-    print("    python run.py --no-web")
-    print("    python run.py --test")
+    print("    python run.py          # 启动监控")
+    print("    python run.py --list   # 历史会话")
+    print("    python run.py --test   # 运行测试")
     print("=" * 50)
 
 
