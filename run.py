@@ -3,9 +3,8 @@
 激活虚拟环境路径后直接运行主程序，支持调试。
 
 用法:
-    python run.py              完整模式（监控 + Web）
-    python run.py --no-web     仅监控报警
-    python run.py --test       运行测试套件
+    python run.py          启动监控（生成报告 + 后台常驻）
+    python run.py --test   运行测试套件
 """
 
 import sys

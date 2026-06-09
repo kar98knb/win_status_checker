@@ -14,13 +14,13 @@ from typing import Optional
 logger = logging.getLogger("snapshot")
 
 SNAPSHOT_FILE = Path(__file__).parent.parent.parent / "logs" / "last_snapshot.json"
-CRASH_REPORT_FILE = Path(__file__).parent.parent.parent / "logs" / "crash_report.json"
 
 
 def save_snapshot(data: dict):
     snapshot = {"timestamp": time.time(), "data": data}
     tmp_path = str(SNAPSHOT_FILE) + ".tmp"
     try:
+        SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, ensure_ascii=False)
             f.flush()
@@ -53,11 +53,6 @@ def check_abnormal_exit(max_gap_seconds: float = 30.0) -> Optional[dict]:
                 "last_state": snapshot.get("data", {}),
                 "conclusion": _analyze_crash_cause(snapshot.get("data", {})),
             }
-            try:
-                with open(CRASH_REPORT_FILE, "w", encoding="utf-8") as f:
-                    json.dump(crash_report, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
             return crash_report
     except (json.JSONDecodeError, Exception) as e:
         logger.debug(f"快照读取失败: {e}")

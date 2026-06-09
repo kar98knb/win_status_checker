@@ -1,41 +1,31 @@
 """
 游戏玩家系统监控工具 - 主入口
-监控网络、GPU、鼠标/键盘驱动状态
-提供 Web GUI 实时查看 + 异常报警
-
-访问地址: http://localhost:8870（端口被占用时自动递增）
+各监控模块独立线程运行，异常时报警通知，退出时生成报告。
 """
 
 import os
 import sys
 import time
 import json
-import asyncio
 import logging
 import threading
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from typing import Set
+from concurrent.futures import ThreadPoolExecutor
 
-# 确保项目根目录在 sys.path 中（从 src/ 往上一级）
+# 确保项目根目录在 sys.path 中
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import psutil
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
 
 from config import (
     MONITOR_INTERVAL,
-    WEB_PORT,
-    WEB_PORT_RANGE,
     ALERT_THRESHOLDS,
     LOG_DIR,
     LOG_MAX_SIZE_MB,
     LOG_BACKUP_COUNT,
     LOG_RETAIN_DAYS,
-    WEB_REFRESH_INTERVAL,
     PROCESS_PRIORITY,
 )
 from src.monitors.network_monitor import NetworkMonitor
@@ -49,30 +39,38 @@ from src.checks.startup_checks import run_startup_checks
 from src.checks.event_log import check_system_events
 
 
+# ============ 全局状态 ============
+
+latest_data = {
+    "network": {},
+    "gpu": {},
+    "system": {},
+    "process_focus": {},
+    "drivers": {},
+    "startup_checks": {},
+    "event_log": {},
+    "timestamp": 0,
+}
+data_lock = threading.Lock()
+
+# 会话目录（每次启动唯一）
+_session_dir: Path = None
+
+
 # ============ 日志配置 ============
 
-def setup_logging():
-    """
-    配置日志系统
-    目录结构:
-        logs/
-        ├── last_snapshot.json      # 一次性：快照文件
-        ├── crash_report.json       # 一次性：崩溃报告
-        └── 20260527_143000/        # 每次启动一个时间戳文件夹
-            ├── monitor.log
-            └── alerts.log
-    """
+def setup_logging() -> Path:
+    """配置日志系统，返回本次会话日志目录"""
     from datetime import datetime
 
     log_root = PROJECT_ROOT / LOG_DIR
     log_root.mkdir(exist_ok=True)
 
-    # 每次启动创建时间戳子目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_dir = log_root / timestamp
     session_dir.mkdir(exist_ok=True)
 
-    # 主日志
+    # 主日志（全局）
     handler = RotatingFileHandler(
         session_dir / "monitor.log",
         maxBytes=LOG_MAX_SIZE_MB * 1024 * 1024,
@@ -83,29 +81,32 @@ def setup_logging():
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     ))
 
-    # 报警专用日志
-    alert_handler = RotatingFileHandler(
-        session_dir / "alerts.log",
-        maxBytes=LOG_MAX_SIZE_MB * 1024 * 1024,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding="utf-8",
-    )
-    alert_handler.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s"
-    ))
-    alert_handler.setLevel(logging.WARNING)
-
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.addHandler(handler)
 
-    alert_logger = logging.getLogger("alerter")
-    alert_logger.addHandler(alert_handler)
-
-    # 清理过期日志目录
     _cleanup_old_logs(log_root)
 
-    return logging.getLogger("main")
+    return session_dir
+
+
+def _setup_module_logger(name: str, session_dir: Path) -> logging.Logger:
+    """为单个监控模块创建独立日志文件"""
+    log_subdir = session_dir / "log"
+    log_subdir.mkdir(exist_ok=True)
+
+    logger = logging.getLogger(f"monitor.{name}")
+    handler = RotatingFileHandler(
+        log_subdir / f"{name}.log",
+        maxBytes=LOG_MAX_SIZE_MB * 1024 * 1024,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s"
+    ))
+    logger.addHandler(handler)
+    return logger
 
 
 def _cleanup_old_logs(log_root: Path):
@@ -114,17 +115,14 @@ def _cleanup_old_logs(log_root: Path):
     import shutil
 
     cutoff = datetime.now() - timedelta(days=LOG_RETAIN_DAYS)
-
     for item in log_root.iterdir():
         if not item.is_dir():
             continue
-        # 只处理时间戳格式的目录（YYYYMMDD_HHMMSS）
         try:
             dir_time = datetime.strptime(item.name, "%Y%m%d_%H%M%S")
             if dir_time < cutoff:
                 shutil.rmtree(item)
         except ValueError:
-            # 不是时间戳格式的目录，跳过
             pass
 
 
@@ -142,316 +140,340 @@ def set_low_priority():
         pass
 
 
-# ============ FastAPI 应用 ============
+# ============ 各模块独立监控线程 ============
 
-app = FastAPI(title="游戏监控面板", docs_url=None, redoc_url=None)
-
-# 全局状态存储
-latest_data = {
-    "network": {},
-    "gpu": {},
-    "system": {},
-    "process_focus": {},
-    "drivers": {},
-    "startup_checks": {},
-    "timestamp": 0,
-}
-data_lock = threading.Lock()
-
-# WebSocket 连接池
-ws_clients: Set[WebSocket] = set()
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    """返回监控面板页面"""
-    html_path = Path(__file__).parent / "web" / "static" / "index.html"
-    content = html_path.read_text(encoding="utf-8")
-    return HTMLResponse(
-        content=content.replace("{{WEB_REFRESH_INTERVAL}}", str(WEB_REFRESH_INTERVAL))
-    )
-
-
-@app.get("/api/status")
-async def get_status():
-    """HTTP API - 获取当前状态快照"""
-    with data_lock:
-        return latest_data.copy()
-
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    """WebSocket 端点 - 实时推送状态"""
-    await ws.accept()
-    ws_clients.add(ws)
-    try:
-        with data_lock:
-            await ws.send_json(latest_data)
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        ws_clients.discard(ws)
-
-
-async def broadcast_to_clients(data: dict):
-    """向所有 WebSocket 客户端广播数据"""
-    dead_clients = set()
-    for ws in ws_clients.copy():
-        try:
-            await ws.send_json(data)
-        except Exception:
-            dead_clients.add(ws)
-    ws_clients -= dead_clients
-
-
-# ============ 监控循环 ============
-
-def monitor_loop(logger: logging.Logger):
-    """后台监控循环（在独立线程运行）"""
-    network_mon = NetworkMonitor()
-    gpu_mon = GPUMonitor()
-    driver_mon = DriverMonitor()
-    system_mon = SystemMonitor()
-    focus_mon = ProcessFocusMonitor()
-    alerter = Alerter(cooldown_seconds=60)
-
-    driver_last_check = 0
-    driver_check_interval = ALERT_THRESHOLDS.get("driver_check_interval", 30)
-
-    logger.info("监控循环已启动")
-
+def _network_loop(alerter: Alerter, logger: logging.Logger):
+    """网络监控线程"""
+    mon = NetworkMonitor()
     while True:
         try:
-            # 采集网络、GPU、系统资源（每次都采）
-            network_status = network_mon.collect()
-            gpu_status = gpu_mon.collect()
-            system_status = system_mon.collect()
-            focus_status = focus_mon.collect()
-
-            # 驱动状态检查频率较低（WMI 查询较重）
-            now = time.time()
-            if now - driver_last_check >= driver_check_interval:
-                driver_status = driver_mon.collect()
-                driver_last_check = now
-            else:
-                driver_status = None
-
-            # 更新全局数据
-            data = {
-                "network": network_status.to_dict(),
-                "gpu": gpu_status.to_dict(),
-                "system": system_status.to_dict(),
-                "process_focus": focus_status.to_dict(),
-                "timestamp": time.time(),
-            }
-            if driver_status:
-                data["drivers"] = driver_status.to_dict()
-
+            status = mon.collect()
             with data_lock:
-                latest_data["network"] = data["network"]
-                latest_data["gpu"] = data["gpu"]
-                latest_data["system"] = data["system"]
-                latest_data["process_focus"] = data["process_focus"]
-                latest_data["timestamp"] = data["timestamp"]
-                if "drivers" in data:
-                    latest_data["drivers"] = data["drivers"]
+                latest_data["network"] = status.to_dict()
 
-            # 检查报警
-            alerter.check_and_alert(
-                network_status,
-                gpu_status,
-                driver_status if driver_status else None,
-                ALERT_THRESHOLDS,
+            # 报警
+            if not status.is_connected:
+                alerter.alert("network_down", "网络断开", "检测到网络连接已断开！", "critical")
+            elif status.packet_loss_percent > ALERT_THRESHOLDS.get("packet_loss_percent", 5):
+                alerter.alert("packet_loss", "网络丢包",
+                              f"丢包率 {status.packet_loss_percent:.1f}%", "warning")
+            if status.latency_anomaly:
+                alerter.alert("latency_spike", "网络延迟突增",
+                              f"延迟 {status.latency_ms:.0f}ms，基线 {status.latency_baseline:.0f}ms", "warning")
+            if status.jitter_anomaly:
+                alerter.alert("jitter_spike", "网络抖动突增",
+                              f"抖动 {status.jitter_ms:.0f}ms", "warning")
+
+            logger.info(
+                f"延迟={status.latency_ms:.1f}ms 抖动={status.jitter_ms:.1f}ms "
+                f"丢包={status.packet_loss_percent:.0f}% 闪断={status.link_down_count}"
             )
-
-            # 系统资源报警
-            if system_status.memory_percent > 90:
-                alerter.alert(
-                    "memory_high",
-                    "内存不足",
-                    f"内存使用 {system_status.memory_percent:.0f}%，"
-                    f"可用 {system_status.memory_available_gb:.1f}GB",
-                    "warning"
-                )
-            if system_status.cpu_throttled:
-                alerter.alert(
-                    "cpu_throttled",
-                    "CPU 降频",
-                    f"CPU 频率 {system_status.cpu_freq_mhz:.0f}MHz "
-                    f"(最大 {system_status.cpu_freq_max_mhz:.0f}MHz)，可能过热降频",
-                    "warning"
-                )
-            if system_status.has_resource_hog:
-                hog_names = [p.name for p in system_status.top_processes
-                             if p.cpu_percent > 15]
-                alerter.alert(
-                    "resource_hog",
-                    "后台进程抢资源",
-                    f"检测到高占用后台进程: {', '.join(hog_names[:3])}",
-                    "info"
-                )
-            if network_status.jitter_ms > 30:
-                alerter.alert(
-                    "high_jitter",
-                    "网络抖动大",
-                    f"抖动 {network_status.jitter_ms:.0f}ms，可能导致游戏卡顿",
-                    "warning"
-                )
-            # 基线突变报警（替代固定阈值，更贴近实际体感）
-            if network_status.latency_anomaly:
-                alerter.alert(
-                    "latency_spike",
-                    "网络延迟突增",
-                    f"延迟 {network_status.latency_ms:.0f}ms，"
-                    f"基线 {network_status.latency_baseline:.0f}ms",
-                    "warning"
-                )
-            if network_status.jitter_anomaly:
-                alerter.alert(
-                    "jitter_spike",
-                    "网络抖动突增",
-                    f"抖动 {network_status.jitter_ms:.0f}ms，网络可能不稳定",
-                    "warning"
-                )
-
-            # 广播给 WebSocket 客户端
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(broadcast_to_clients(latest_data.copy()))
-                loop.close()
-            except Exception:
-                pass
-
-            # 快照落盘（确保卡死时数据可追溯）
-            save_snapshot(latest_data.copy())
-
         except Exception as e:
-            logger.error(f"监控循环异常: {e}", exc_info=True)
+            logger.error(f"异常: {e}")
 
         time.sleep(MONITOR_INTERVAL)
 
 
-# ============ 端口探测 ============
-
-def _find_available_port(start_port: int, max_range: int) -> int:
-    """从 start_port 开始探测可用端口，最多尝试 max_range 个"""
-    import socket
-
-    for offset in range(max_range):
-        port = start_port + offset
+def _gpu_loop(alerter: Alerter, logger: logging.Logger):
+    """GPU 监控线程"""
+    mon = GPUMonitor()
+    while True:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("0.0.0.0", port))
-                return port
-        except OSError:
-            continue
+            status = mon.collect()
+            with data_lock:
+                latest_data["gpu"] = status.to_dict()
 
-    # 全部被占用，回退到首选端口（让 uvicorn 报错）
-    return start_port
+            if status.is_available:
+                if status.temperature_celsius > ALERT_THRESHOLDS.get("gpu_temp_celsius", 85) and status.temperature_celsius > 0:
+                    alerter.alert("gpu_temp", "GPU 过热",
+                                  f"GPU 温度 {status.temperature_celsius:.0f}°C", "critical")
+                if status.memory_percent > ALERT_THRESHOLDS.get("gpu_memory_percent", 95):
+                    alerter.alert("gpu_memory", "显存不足",
+                                  f"显存使用 {status.memory_percent:.1f}%", "warning")
+
+                logger.info(
+                    f"使用率={status.gpu_usage_percent:.1f}% 温度={status.temperature_celsius:.0f}°C "
+                    f"显存={status.memory_percent:.1f}%"
+                )
+        except Exception as e:
+            logger.error(f"异常: {e}")
+
+        time.sleep(MONITOR_INTERVAL)
+
+
+def _system_loop(alerter: Alerter, logger: logging.Logger):
+    """系统资源监控线程（CPU/内存/磁盘/进程抢占）"""
+    mon = SystemMonitor()
+    while True:
+        try:
+            status = mon.collect()
+            with data_lock:
+                latest_data["system"] = status.to_dict()
+
+            if status.memory_percent > 90:
+                alerter.alert("memory_high", "内存不足",
+                              f"内存使用 {status.memory_percent:.0f}%，可用 {status.memory_available_gb:.1f}GB", "warning")
+            if status.cpu_throttled:
+                alerter.alert("cpu_throttled", "CPU 降频",
+                              f"频率 {status.cpu_freq_mhz:.0f}/{status.cpu_freq_max_mhz:.0f}MHz", "warning")
+            if status.has_resource_hog:
+                hog_names = [p.name for p in status.top_processes if p.cpu_percent > 15]
+                alerter.alert("resource_hog", "后台进程抢资源",
+                              f"{', '.join(hog_names[:3])}", "info")
+
+            logger.info(
+                f"CPU={status.cpu_usage_percent:.1f}% 内存={status.memory_percent:.1f}% "
+                f"磁盘R={status.disk_read_mb_per_sec:.1f}MB/s W={status.disk_write_mb_per_sec:.1f}MB/s"
+            )
+        except Exception as e:
+            logger.error(f"异常: {e}")
+
+        time.sleep(MONITOR_INTERVAL)
+
+
+def _driver_loop(alerter: Alerter, logger: logging.Logger):
+    """设备驱动监控线程"""
+    mon = DriverMonitor()
+    interval = ALERT_THRESHOLDS.get("driver_check_interval", 30)
+    while True:
+        try:
+            status = mon.collect()
+            with data_lock:
+                latest_data["drivers"] = status.to_dict()
+
+            if not status.all_mice_ok:
+                alerter.alert("mouse_driver", "鼠标驱动异常", "鼠标设备驱动异常", "critical")
+            if not status.all_keyboards_ok:
+                alerter.alert("keyboard_driver", "键盘驱动异常", "键盘设备驱动异常", "critical")
+            if not status.all_audio_ok:
+                alerter.alert("audio_driver", "音频设备异常", "耳机/音频设备驱动异常", "warning")
+            if not status.all_controllers_ok:
+                alerter.alert("controller_driver", "手柄驱动异常", "游戏手柄/控制器驱动异常", "warning")
+            if not status.all_bluetooth_ok:
+                alerter.alert("bluetooth_driver", "蓝牙异常", "蓝牙设备驱动异常", "warning")
+
+            device_count = len(status.mice) + len(status.keyboards) + len(status.audio_devices)
+            logger.info(f"设备={device_count} 鼠标OK={status.all_mice_ok} 键盘OK={status.all_keyboards_ok}")
+        except Exception as e:
+            logger.error(f"异常: {e}")
+
+        time.sleep(interval)
+
+
+def _focus_loop(alerter: Alerter, logger: logging.Logger):
+    """进程焦点监控线程"""
+    mon = ProcessFocusMonitor()
+    while True:
+        try:
+            status = mon.collect()
+            with data_lock:
+                latest_data["process_focus"] = status.to_dict()
+
+            if status.focused:
+                logger.info(
+                    f"焦点={status.focused.name} PID={status.focused.pid} "
+                    f"CPU={status.focused.cpu_percent:.1f}% 内存={status.focused.memory_mb:.0f}MB"
+                )
+            # 检查最近退出
+            if status.recent_exits:
+                last_exit = status.recent_exits[-1]
+                if last_exit.get("exited_at", 0) > time.time() - MONITOR_INTERVAL * 2:
+                    alerter.alert("focus_exit", "焦点进程退出",
+                                  f"{last_exit['name']} 已退出", "info")
+        except Exception as e:
+            logger.error(f"异常: {e}")
+
+        time.sleep(MONITOR_INTERVAL)
+
+
+def _snapshot_loop():
+    """快照写入线程（独立高频率）"""
+    while True:
+        try:
+            with data_lock:
+                save_snapshot(latest_data.copy())
+        except Exception:
+            pass
+        time.sleep(MONITOR_INTERVAL)
+
+
+# ============ 报告生成 ============
+
+def generate_report() -> str:
+    """生成当前状态报告"""
+    from datetime import datetime
+
+    with data_lock:
+        data = latest_data.copy()
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append(f"  系统状态报告 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 60)
+
+    # 网络
+    net = data.get("network", {})
+    lines.append(f"\n[网络]")
+    lines.append(f"  连接: {'正常' if net.get('is_connected') else '断开'}")
+    lines.append(f"  延迟: {net.get('latency_ms', 0):.1f}ms (基线 {net.get('latency_baseline', 0):.1f}ms)")
+    lines.append(f"  抖动: {net.get('jitter_ms', 0):.1f}ms")
+    lines.append(f"  丢包: {net.get('packet_loss_percent', 0):.1f}%")
+    lines.append(f"  闪断: {net.get('link_down_count', 0)} 次")
+    lines.append(f"  适配器: {net.get('adapter_name', 'N/A')}")
+
+    # GPU
+    gpu = data.get("gpu", {})
+    lines.append(f"\n[GPU]")
+    lines.append(f"  型号: {gpu.get('gpu_name', 'N/A')}")
+    lines.append(f"  使用率: {gpu.get('gpu_usage_percent', 0):.1f}%")
+    lines.append(f"  温度: {gpu.get('temperature_celsius', -1):.0f}°C")
+    lines.append(f"  显存: {gpu.get('memory_used_mb', 0):.0f}/{gpu.get('memory_total_mb', 0):.0f}MB")
+    lines.append(f"  驱动: {gpu.get('driver_version', 'N/A')}")
+
+    # 系统
+    sys_data = data.get("system", {})
+    lines.append(f"\n[CPU/内存/磁盘]")
+    lines.append(f"  CPU: {sys_data.get('cpu_usage_percent', 0):.1f}%  频率: {sys_data.get('cpu_freq_mhz', 0):.0f}/{sys_data.get('cpu_freq_max_mhz', 0):.0f}MHz")
+    lines.append(f"  降频: {'是' if sys_data.get('cpu_throttled') else '否'}")
+    lines.append(f"  内存: {sys_data.get('memory_used_gb', 0):.1f}/{sys_data.get('memory_total_gb', 0):.1f}GB ({sys_data.get('memory_percent', 0):.1f}%)")
+    lines.append(f"  磁盘: 读 {sys_data.get('disk_read_mb_per_sec', 0):.1f}MB/s  写 {sys_data.get('disk_write_mb_per_sec', 0):.1f}MB/s")
+
+    # 焦点进程
+    focus = data.get("process_focus", {})
+    focused = focus.get("focused")
+    lines.append(f"\n[焦点进程]")
+    if focused:
+        lines.append(f"  {focused['name']} (PID {focused['pid']})")
+        lines.append(f"  CPU: {focused['cpu_percent']:.1f}%  内存: {focused['memory_mb']:.0f}MB")
+    else:
+        lines.append(f"  无（未检测到高占用游戏进程）")
+
+    # 驱动
+    drv = data.get("drivers", {})
+    lines.append(f"\n[设备驱动]")
+    lines.append(f"  鼠标: {'正常' if drv.get('all_mice_ok', True) else '异常'}")
+    lines.append(f"  键盘: {'正常' if drv.get('all_keyboards_ok', True) else '异常'}")
+    lines.append(f"  音频: {'正常' if drv.get('all_audio_ok', True) else '异常'}")
+    lines.append(f"  蓝牙: {'正常' if drv.get('all_bluetooth_ok', True) else '异常'}")
+
+    # 启动检测
+    startup = data.get("startup_checks", {})
+    if startup:
+        lines.append(f"\n[启动检测]")
+        lines.append(f"  电源计划: {startup.get('power_plan', 'N/A')} ({'OK' if startup.get('power_plan_ok') else '建议高性能'})")
+        lines.append(f"  刷新率: {startup.get('display_refresh_rate', 0)}Hz")
+        lines.append(f"  待重启更新: {'是' if startup.get('pending_reboot') else '否'}")
+
+    # 事件日志
+    evlog = data.get("event_log", {})
+    if evlog.get("event_count", 0) > 0:
+        lines.append(f"\n[系统事件 (过去{evlog.get('scan_hours', 24)}h)]")
+        if evlog.get("has_unexpected_shutdown"):
+            lines.append(f"  ⚠ 意外关机/卡死记录")
+        if evlog.get("has_gpu_tdr"):
+            lines.append(f"  ⚠ GPU 驱动崩溃 (TDR)")
+        if evlog.get("has_app_crash"):
+            lines.append(f"  ⚠ 应用崩溃记录")
+        lines.append(f"  共 {evlog.get('event_count', 0)} 条相关事件")
+
+    lines.append(f"\n{'=' * 60}")
+    return "\n".join(lines)
 
 
 # ============ 启动 ============
 
 def main():
     """主入口"""
-    import argparse
+    global _session_dir
 
-    parser = argparse.ArgumentParser(description="游戏系统监控工具")
-    parser.add_argument(
-        "--no-web", "-n",
-        action="store_true",
-        help="仅运行监控和报警，不启动 Web 服务"
-    )
-    args = parser.parse_args()
-
-    logger = setup_logging()
+    _session_dir = setup_logging()
+    logger = logging.getLogger("main")
     set_low_priority()
 
-    # 检查上次是否异常退出（卡死/崩溃）
-    crash_report = check_abnormal_exit(max_gap_seconds=MONITOR_INTERVAL * 15)
+    # 并行执行启动检测
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        future_crash = pool.submit(check_abnormal_exit, MONITOR_INTERVAL * 15)
+        future_events = pool.submit(check_system_events, 24)
+        future_startup = pool.submit(run_startup_checks)
+
+        crash_report = future_crash.result()
+        event_result = future_events.result()
+        startup_result = future_startup.result()
+
+    # 处理异常退出
     if crash_report:
-        logger.critical("=" * 50)
-        logger.critical("检测到上次异常退出（可能卡死/崩溃）")
-        logger.critical(f"  上次快照时间距今: {crash_report['gap_seconds']}s")
+        # 写入当前会话目录
+        crash_path = _session_dir / "crash_report.json"
+        crash_path.write_text(
+            json.dumps(crash_report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.critical("检测到上次异常退出")
         logger.critical(f"  {crash_report['conclusion']}")
-        logger.critical("  详细报告: logs/crash_report.json")
-        logger.critical("=" * 50)
         print(f"\n  ⚠ 检测到上次异常退出！")
         print(f"    {crash_report['conclusion']}")
-        print(f"    详细报告: logs/crash_report.json\n")
+        print(f"    详细报告: {crash_path}\n")
 
-    # 回溯 Windows 系统事件日志
-    event_result = check_system_events(hours_back=24)
-    if event_result.events:
-        with data_lock:
-            latest_data["event_log"] = event_result.to_dict()
-        if event_result.has_unexpected_shutdown:
-            print(f"  ⚠ 事件日志发现意外关机/卡死记录！")
-        if event_result.has_gpu_tdr:
-            print(f"  ⚠ 事件日志发现 GPU 驱动崩溃(TDR)记录！")
-        if event_result.events and not event_result.has_unexpected_shutdown and not event_result.has_gpu_tdr:
-            print(f"  ℹ 过去24h有 {len(event_result.events)} 条系统异常事件（详见日志）")
+    # 处理事件日志
+    with data_lock:
+        latest_data["event_log"] = event_result.to_dict()
+    if event_result.has_unexpected_shutdown:
+        print(f"  ⚠ 事件日志发现意外关机/卡死记录！")
+    if event_result.has_gpu_tdr:
+        print(f"  ⚠ 事件日志发现 GPU 驱动崩溃(TDR)记录！")
 
-    mode = "仅监控" if args.no_web else "完整（监控 + Web）"
-    logger.info("=" * 50)
-    logger.info("游戏监控工具启动")
-    logger.info(f"运行模式: {mode}")
-    logger.info(f"监控间隔: {MONITOR_INTERVAL}s")
-    logger.info(f"Web 端口: {WEB_PORT}")
-    logger.info(f"进程优先级: {PROCESS_PRIORITY}")
-    logger.info("=" * 50)
-
-    monitor_thread = threading.Thread(target=monitor_loop, args=(logger,), daemon=True)
-    monitor_thread.start()
-
-    # 启动时一次性检测
-    logger.info("执行启动检测...")
-    startup_result = run_startup_checks()
+    # 处理启动检测
     with data_lock:
         latest_data["startup_checks"] = startup_result.to_dict()
-
     if startup_result.warnings:
         print(f"  ⚠ 启动检测发现 {len(startup_result.warnings)} 个问题:")
         for w in startup_result.warnings:
             print(f"    - {w}")
         print()
 
-    if args.no_web:
-        print(f"\n{'='*50}")
-        print(f"  监控已启动（无 Web 服务）")
-        print(f"  报警通知正常工作")
-        print(f"  日志记录在 logs/ 目录")
-        print(f"  按 Ctrl+C 停止")
-        print(f"{'='*50}\n")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            clear_snapshot()  # 正常退出，清除快照
-            print("\n监控已停止。")
-    else:
-        # 端口探测：首选端口被占用时自动递增
-        actual_port = _find_available_port(WEB_PORT, WEB_PORT_RANGE)
+    # 启动各模块监控线程（独立日志）
+    alerter = Alerter(cooldown_seconds=60)
+    monitor_threads = [
+        ("network", _network_loop),
+        ("gpu", _gpu_loop),
+        ("system", _system_loop),
+        ("drivers", _driver_loop),
+        ("focus", _focus_loop),
+    ]
 
-        print(f"\n{'='*50}")
-        print(f"  游戏监控面板已启动！")
-        print(f"  打开浏览器访问: http://localhost:{actual_port}")
-        if actual_port != WEB_PORT:
-            print(f"  (首选端口 {WEB_PORT} 被占用，使用 {actual_port})")
-        print(f"  按 Ctrl+C 停止")
-        print(f"{'='*50}\n")
+    for name, loop_func in monitor_threads:
+        mod_logger = _setup_module_logger(name, _session_dir)
+        t = threading.Thread(target=loop_func, args=(alerter, mod_logger), daemon=True, name=name)
+        t.start()
 
-        try:
-            uvicorn.run(
-                app,
-                host="0.0.0.0",
-                port=actual_port,
-                log_level="warning",
-            )
-        finally:
-            clear_snapshot()  # 正常退出，清除快照
+    # 快照线程
+    threading.Thread(target=_snapshot_loop, daemon=True, name="snapshot").start()
+
+    logger.info("=" * 50)
+    logger.info("所有监控线程已启动")
+    logger.info(f"监控间隔: {MONITOR_INTERVAL}s")
+    logger.info(f"日志目录: {_session_dir}")
+    logger.info("=" * 50)
+
+    print(f"\n{'='*50}")
+    print(f"  监控已启动（{len(monitor_threads)} 个模块独立运行）")
+    print(f"  异常时自动报警通知")
+    print(f"  日志: {_session_dir}")
+    print(f"  按 Ctrl+C 停止并生成报告")
+    print(f"{'='*50}\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        # 正常退出：生成报告
+        print("\n生成报告...")
+        report = generate_report()
+        report_path = _session_dir / "report.txt"
+        report_path.write_text(report, encoding="utf-8")
+        print(report)
+        print(f"\n报告已保存: {report_path}")
+        clear_snapshot()
+        print("监控已停止。")
 
 
 if __name__ == "__main__":

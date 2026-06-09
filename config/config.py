@@ -7,10 +7,6 @@
 # 推荐 2-3 秒，对游戏几乎无影响
 MONITOR_INTERVAL = 2
 
-# Web 服务端口（首选，被占用时自动递增寻找可用端口）
-WEB_PORT = 8870
-WEB_PORT_RANGE = 10  # 最多尝试 8870-8879
-
 # 报警阈值
 ALERT_THRESHOLDS = {
     # 网络相关
@@ -41,9 +37,6 @@ LOG_DIR = "logs"
 LOG_MAX_SIZE_MB = 50
 LOG_BACKUP_COUNT = 5
 LOG_RETAIN_DAYS = 7              # 日志保留天数，超过自动清理
-
-# Web 页面刷新间隔（秒）
-WEB_REFRESH_INTERVAL = 2
 
 # 进程优先级：设为 "below_normal" 确保不抢游戏资源
 # 可选: "idle", "below_normal", "normal"

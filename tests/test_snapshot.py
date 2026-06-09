@@ -19,18 +19,16 @@ from src.alerts.snapshot import (
     clear_snapshot,
     _analyze_crash_cause,
     SNAPSHOT_FILE,
-    CRASH_REPORT_FILE,
 )
 
 
 # 使用临时目录避免污染真实日志
 _TEST_SNAPSHOT = Path(tempfile.gettempdir()) / "test_snapshot.json"
-_TEST_CRASH_REPORT = Path(tempfile.gettempdir()) / "test_crash_report.json"
 
 
 def _cleanup():
     """清理测试文件"""
-    for f in (_TEST_SNAPSHOT, _TEST_CRASH_REPORT, Path(str(_TEST_SNAPSHOT) + ".tmp")):
+    for f in (_TEST_SNAPSHOT, Path(str(_TEST_SNAPSHOT) + ".tmp")):
         try:
             f.unlink()
         except FileNotFoundError:
@@ -83,7 +81,6 @@ def test_save_snapshot_atomic():
 # ============ 异常退出检测测试 ============
 
 @patch("src.alerts.snapshot.SNAPSHOT_FILE", _TEST_SNAPSHOT)
-@patch("src.alerts.snapshot.CRASH_REPORT_FILE", _TEST_CRASH_REPORT)
 def test_check_abnormal_exit_detected():
     """测试检测到异常退出"""
     _cleanup()
@@ -99,7 +96,6 @@ def test_check_abnormal_exit_detected():
     assert result is not None
     assert result["gap_seconds"] > 3500
     assert "GPU 过热" in result["conclusion"]
-    assert _TEST_CRASH_REPORT.exists()
     _cleanup()
     print("  ✓ 异常退出检测: 正确识别（gap > 30s）")
 
