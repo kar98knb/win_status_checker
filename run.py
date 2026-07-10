@@ -52,21 +52,13 @@ if __name__ == "__main__":
         sys.argv = [sys.argv[0]]
         from tests.run_all import main as run_tests
         run_tests()
-    elif "--list" in sys.argv or "-l" in sys.argv:
-        from src.analyzer import print_sessions
-        print_sessions()
-    elif "--analyze" in sys.argv or "-a" in sys.argv:
-        from src.analyzer import analyze_sessions
-        # 解析序号参数
-        args = sys.argv[1:]
-        try:
-            flag_idx = args.index("--analyze") if "--analyze" in args else args.index("-a")
-            idx1 = int(args[flag_idx + 1])
-            idx2 = int(args[flag_idx + 2])
-            analyze_sessions(idx1, idx2)
-        except (IndexError, ValueError):
-            print("  用法: python run.py --analyze <序号1> <序号2>")
-            print("  先用 python run.py --list 查看可用序号")
     else:
+        # 检查管理员权限
+        import ctypes
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            print("\n  ✗ 需要管理员权限运行（ETW 内核事件订阅）")
+            print("    请右键 → 以管理员身份运行\n")
+            sys.exit(1)
+
         from src.main import main
         main()

@@ -3,3 +3,6 @@ __pycache__/
 logs/
 *.pyc
 .vscode/*
+tests/filter_validation/artifacts/
+log.txt
+*.etl
