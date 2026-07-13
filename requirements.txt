@@ -1,3 +1,7 @@
 psutil==6.0.0
 wmi==1.5.1
 pywin32>=306
+
+# 测试依赖：filter_validation/test_process_crash.py 用 tcc 编译 crash.c
+# 触发真实 access violation（Python 层无法产生未拦截的 AV）
+tinycc>=1.1

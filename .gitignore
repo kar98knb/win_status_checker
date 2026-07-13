@@ -4,5 +4,6 @@ logs/
 *.pyc
 .vscode/*
 tests/filter_validation/artifacts/
+tests/filter_validation/native/*.exe
 log.txt
 *.etl

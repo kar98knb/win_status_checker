@@ -123,13 +123,59 @@ ETW_KEYWORD_BLACKLIST = {
     "Kernel-Disk": [],
 
     # Kernel-Memory - 内存管理
-    # 只保留 MEMINFO/MEMINFO_EX/WS_SWAP，去掉高频的 PHYSICAL_ALLOC 和 ACG
+    # 保留 MEMINFO(0x20)、MEMINFO_NODE(0x400)、WS_SWAP，
+    # 屏蔽高频的 PHYSICAL_ALLOC 和 ACG。
+    # 注意：实测 filter_validation memory_pressure 场景里，Kernel-Memory 的
+    #   MEMINFO id=1 payload 直接给可用页数（FreePageCount 等），是判断
+    #   内存压力最直接的信号，主流程务必消费这个事件。
     "Kernel-Memory": [
-        (0x0000000000000100, "ACG",
-         "Arbitrary Code Guard 事件，高频且非常态使用"),
         (0x0000000000000200, "PHYSICAL_ALLOC",
          "物理内存分配事件，量非常大"),
     ],
+
+    # Kernel-Power - 系统电源管理（休眠/唤醒/温度/idle）
+    # 实测（io_estimate.py）不加过滤时每秒 8000+ 事件，占总 IO 65%
+    # 保留: Diagnostic(0x4), Thermal(0x20), SleepDiagnostic(0x1000),
+    #      WakeDiagnostics(0x10000)
+    #      —— 这些是"事后重建"用得着的诊断事件
+    "Kernel-Power": [
+        (0x0000000000000001, "Scenario",
+         "电源场景标记，量大"),
+        (0x0000000000000002, "Simple",
+         "简单周期性 tick 事件 (event 557)，最高频"),
+        (0x0000000000000008, "Performance",
+         "电源性能采样，高频"),
+        (0x0000000000000010, "Idle",
+         "CPU idle 状态切换，每次进出 idle 都发"),
+        (0x0000000000000040, "PerfTrackContext",
+         "性能跟踪上下文，高频"),
+        (0x0000000000000080, "PowerSetting",
+         "电源设置变更（含高频的 ACPI 事件）"),
+        (0x0000000000000100, "RuntimeFx",
+         "运行时电源框架事件"),
+        (0x0000000000004000, "TimerResolution",
+         "定时器分辨率变化，游戏切换时会多"),
+        (0x0000000000008000, "PowerAggregator",
+         "电源聚合器"),
+    ],
+
+    # USB-USBPORT - USB 2.0 端口层
+    # 现有测试机上事件量极低（不到 100 个/2min），暂不做过滤
+    "USB-USBPORT": [],
+
+    # USB-USBHUB3 - USB 3.0 集线器
+    "USB-USBHUB3": [],
+
+    # BTH-BTHPORT / BTH-BTHUSB - Bluetooth 协议栈
+    "BTH-BTHPORT": [],
+    "BTH-BTHUSB": [],
+
+    # Input-HIDCLASS - HID 类驱动
+    "Input-HIDCLASS": [],
+
+    # Kernel-Audio - 音频子系统
+    # 待观察，暂不过滤
+    "Kernel-Audio": [],
 }
 
 

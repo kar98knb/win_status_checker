@@ -17,26 +17,54 @@ from .providers import GUID
 logger = logging.getLogger("etw.session")
 
 # ============ 常量 ============
+# 都是从 SDK 头文件 wmistr.h / evntrace.h 里抄的 #define，Windows API 用它们
+# 当作 bitmask 或枚举值。我们只抄用到的，没抄全。
 
+# --- WNODE_HEADER.Flags 位掩码（wmistr.h） ---
+# 标识这个 WNODE 的 Guid 字段有效。所有 ETW session 都要设。
 WNODE_FLAG_TRACED_GUID = 0x00020000
-EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x00000001
-EVENT_TRACE_FILE_MODE_CIRCULAR = 0x00000002
-EVENT_TRACE_BUFFERING_MODE = 0x00000400
-EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1
-EVENT_TRACE_CONTROL_STOP = 1
-EVENT_TRACE_CONTROL_FLUSH = 3
-EVENT_TRACE_CONTROL_QUERY = 0
 
-# Trace level
-TRACE_LEVEL_CRITICAL = 1
-TRACE_LEVEL_ERROR = 2
-TRACE_LEVEL_WARNING = 3
+# --- EVENT_TRACE_PROPERTIES.LogFileMode 位掩码（evntrace.h） ---
+EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x00000001  # 顺序写文件，写满就报错
+EVENT_TRACE_FILE_MODE_CIRCULAR   = 0x00000002  # 环形写文件，写满覆盖旧的（我们用这个）
+EVENT_TRACE_BUFFERING_MODE       = 0x00000400  # 只在内存 buffer 环形保留，不落盘
+
+# --- EnableTraceEx2 的 ControlCode 参数（evntrace.h） ---
+EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1  # 启用一个 provider（我们只用这一个）
+
+# --- ControlTraceW 的 ControlCode 参数（evntrace.h） ---
+EVENT_TRACE_CONTROL_QUERY = 0  # 查 session 状态
+EVENT_TRACE_CONTROL_STOP  = 1  # 停止 session
+EVENT_TRACE_CONTROL_FLUSH = 3  # 强制 flush 到磁盘
+
+# --- Trace level（evntrace.h TRACE_LEVEL_*） ---
+# EnableTraceEx2 的 Level 参数。数值越大越啰嗦，用作"至少这个级别以上的事件才发"。
+# 特殊值：Level=0 (LogAlways) 的事件不受此过滤影响，永远会发。
+TRACE_LEVEL_CRITICAL    = 1
+TRACE_LEVEL_ERROR       = 2
+TRACE_LEVEL_WARNING     = 3
 TRACE_LEVEL_INFORMATION = 4
-TRACE_LEVEL_VERBOSE = 5
+TRACE_LEVEL_VERBOSE     = 5
 
 
 # ============ 结构体 ============
+# 下面全部照抄 SDK 头文件的 struct 布局，字段顺序 / 大小 / 对齐必须一致，
+# 否则 Windows 按字节读进去就错位。
 
+# WNODE_HEADER — 所有 WMI/ETW 结构体的通用头（wmistr.h）
+# https://learn.microsoft.com/en-us/windows/win32/etw/wnode-header
+#
+# 原型（简化去掉了 union）：
+#   typedef struct _WNODE_HEADER {
+#       ULONG          BufferSize;         // 整个 WNODE 的总字节数（含尾部数据）
+#       ULONG          ProviderId;         // 保留，填 0
+#       ULONG64        HistoricalContext;  // 由 API 填回 trace handle
+#       LARGE_INTEGER  TimeStamp;          // API 返回时的时间戳
+#       GUID           Guid;               // session 的 GUID（我们不关心，填零）
+#       ULONG          ClientContext;      // 时间戳单位：1=QueryPerformanceCounter,
+#                                          //           2=系统时间, 3=CPU 计数器
+#       ULONG          Flags;              // 位掩码：WNODE_FLAG_TRACED_GUID 等
+#   } WNODE_HEADER;
 class WNODE_HEADER(ctypes.Structure):
     _fields_ = [
         ("BufferSize", wt.ULONG),
@@ -49,6 +77,38 @@ class WNODE_HEADER(ctypes.Structure):
     ]
 
 
+# EVENT_TRACE_PROPERTIES — session 的所有配置 + 运行时统计都塞这一个结构体里（evntrace.h）
+# https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-event_trace_properties
+#
+# 变长布局: [EVENT_TRACE_PROPERTIES][LogFileName wchar_t[]][LoggerName wchar_t[]]
+# 两个 *Offset 字段告诉 Windows 字符串放在结构体后面哪个偏移，
+# 详见 _alloc_properties() 里的拼装。
+#
+# 用途分两拨：
+#   - 传给 StartTraceW: 我们填 BufferSize/LogFileMode/MaximumFileSize 等【输入】字段
+#   - ControlTraceW(QUERY) 返回时：Windows 填 BuffersWritten/EventsLost 等【输出】字段
+#
+# 原型：
+#   typedef struct _EVENT_TRACE_PROPERTIES {
+#       WNODE_HEADER Wnode;               // 见上面
+#       ULONG BufferSize;                 // 单个 buffer 大小（KB）
+#       ULONG MinimumBuffers;             // 最少 buffer 个数
+#       ULONG MaximumBuffers;             // 最多 buffer 个数
+#       ULONG MaximumFileSize;            // .etl 文件最大大小（MB），环形写模式用
+#       ULONG LogFileMode;                // EVENT_TRACE_FILE_MODE_* / BUFFERING 位掩码
+#       ULONG FlushTimer;                 // 强制 flush 间隔（秒），0=只有 buffer 满才 flush
+#       ULONG EnableFlags;                // 旧版 NT Kernel Logger 用，新版本忽略
+#       LONG  AgeLimit;                   // 保留字段
+#       ULONG NumberOfBuffers;            // [输出] 当前 buffer 总数
+#       ULONG FreeBuffers;                // [输出] 空闲 buffer 数
+#       ULONG EventsLost;                 // [输出] 因 buffer 满被丢的事件数
+#       ULONG BuffersWritten;             // [输出] 已写入磁盘的 buffer 数
+#       ULONG LogBuffersLost;             // [输出] 写盘失败丢失的 buffer 数
+#       ULONG RealTimeBuffersLost;        // [输出] 实时消费者跟不上丢的 buffer 数
+#       HANDLE LoggerThreadId;            // [输出] logger 线程 handle
+#       ULONG LogFileNameOffset;          // [输入] 文件名相对结构体首地址的偏移
+#       ULONG LoggerNameOffset;           // [输入] session 名相对结构体首地址的偏移
+#   } EVENT_TRACE_PROPERTIES;
 class EVENT_TRACE_PROPERTIES(ctypes.Structure):
     _fields_ = [
         ("Wnode", WNODE_HEADER),
@@ -73,29 +133,75 @@ class EVENT_TRACE_PROPERTIES(ctypes.Structure):
 
 
 # ============ Event ID 白名单过滤 ============
+# 这三个结构体互相嵌套，专门用来在 EnableTraceEx2 里做 event id 级别的过滤。
+# 内存布局（三层指针链）：
+#
+#   ENABLE_TRACE_PARAMETERS
+#       └── EnableFilterDesc ──► EVENT_FILTER_DESCRIPTOR
+#                                    └── Ptr ──► filter_buf 裸内存块
+#                                                 └── [EVENT_FILTER_EVENT_ID][USHORT Events[]]
 
-# EVENT_FILTER_DESCRIPTOR.Type 常量
+# EVENT_FILTER_DESCRIPTOR.Type 的取值（evntprov.h）
+# 0x80000200 表示 buffer 里放的是"event id 数组"，让 Windows 用它做白/黑名单过滤
 EVENT_FILTER_TYPE_EVENT_ID = 0x80000200
 
-# EVENT_FILTER_EVENT_ID 结构（可变长度：末尾跟着 event id 数组）
-# 定义头部部分，实际使用时手动构造 buffer
+
+# EVENT_FILTER_EVENT_ID — event id 数组的头部（evntprov.h）
+# https://learn.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_filter_event_id
+#
+# 变长结构体：末尾跟着 USHORT Events[Count]。ctypes 里只声明头部，
+# 用 memcpy 或指针切片往后填 event id 数组。
+#
+# 原型：
+#   typedef struct _EVENT_FILTER_EVENT_ID {
+#       BOOLEAN FilterIn;       // TRUE=白名单（只留列出的）, FALSE=黑名单
+#       UCHAR   Reserved;
+#       USHORT  Count;          // 后面数组的元素个数
+#       USHORT  Events[ANYSIZE_ARRAY];   // 具体的 event id 列表
+#   } EVENT_FILTER_EVENT_ID;
 class EVENT_FILTER_EVENT_ID_HEADER(ctypes.Structure):
     _fields_ = [
-        ("FilterIn", wt.BOOLEAN),   # TRUE = 白名单（只保留列出的），FALSE = 黑名单
+        ("FilterIn", wt.BOOLEAN),
         ("Reserved", ctypes.c_ubyte),
-        ("Count", wt.USHORT),       # 后面 event id 数组的长度
-        # 后面跟着 USHORT Events[Count]
+        ("Count", wt.USHORT),
+        # 尾部 USHORT Events[Count] 手动拼
     ]
 
 
+# EVENT_FILTER_DESCRIPTOR — 通用"过滤器描述符"，指向过滤数据本体（evntprov.h）
+# https://learn.microsoft.com/en-us/windows/desktop/api/Evntprov/ns-evntprov-event_filter_descriptor
+#
+# Windows 用 (Type, Ptr, Size) 三元组描述"过滤数据在哪儿、什么格式、多大"。
+# Type 决定 Windows 怎么解析 Ptr 指向的数据。我们只用 EVENT_ID 类型。
+#
+# 原型：
+#   typedef struct _EVENT_FILTER_DESCRIPTOR {
+#       ULONGLONG Ptr;    // 指向过滤数据（这里是 EVENT_FILTER_EVENT_ID 结构）
+#       ULONG     Size;   // 过滤数据字节数
+#       ULONG     Type;   // EVENT_FILTER_TYPE_* 中的一个
+#   } EVENT_FILTER_DESCRIPTOR;
 class EVENT_FILTER_DESCRIPTOR(ctypes.Structure):
     _fields_ = [
-        ("Ptr", ctypes.c_uint64),   # 指向过滤数据的指针
+        ("Ptr", ctypes.c_uint64),
         ("Size", wt.ULONG),
         ("Type", wt.ULONG),
     ]
 
 
+# ENABLE_TRACE_PARAMETERS — EnableTraceEx2 第 8 个参数指向的配置结构（evntrace.h）
+# https://learn.microsoft.com/en-us/windows/win32/api/evntrace/ns-evntrace-enable_trace_parameters
+#
+# 我们只用它来挂 event id 过滤器。原本还可以放 provider 私有配置，我们没用。
+#
+# 原型：
+#   typedef struct _ENABLE_TRACE_PARAMETERS {
+#       ULONG  Version;                            // 必须填 2
+#       ULONG  EnableProperty;                     // EVENT_ENABLE_PROPERTY_* 位掩码，0=默认
+#       ULONG  ControlFlags;                       // 保留，填 0
+#       GUID   SourceId;                           // 谁启用的这个 provider（诊断用，可全零）
+#       PEVENT_FILTER_DESCRIPTOR EnableFilterDesc; // 指向过滤器描述符（数组）
+#       ULONG  FilterDescCount;                    // 数组元素个数（我们只用一个，填 1）
+#   } ENABLE_TRACE_PARAMETERS;
 class ENABLE_TRACE_PARAMETERS(ctypes.Structure):
     _fields_ = [
         ("Version", wt.ULONG),
@@ -106,27 +212,88 @@ class ENABLE_TRACE_PARAMETERS(ctypes.Structure):
         ("FilterDescCount", wt.ULONG),
     ]
 
+# Version 字段必须填 2（对应 Windows 8.1+ 的结构布局）
 ENABLE_TRACE_PARAMETERS_VERSION_2 = 2
 
 
 # ============ API 绑定 ============
+# ETW 相关 API 都在 advapi32.dll，Windows 装机就有。
+# 每个 API 都要设 restype 和 argtypes，否则 ctypes 会按 int 默认 marshal 参数，
+# 64 位指针/handle 会被截成 32 位，直接段错误或返回 87 (INVALID_PARAMETER)。
 
 advapi32 = ctypes.windll.advapi32
 
+
+# StartTraceW — 创建并启动一个 ETW session
+# https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-starttracew
+#
+# 原型:
+#   ULONG StartTraceW(
+#       _Out_ PTRACEHANDLE           TraceHandle,     // 输出：新 session 的 handle
+#       _In_  LPCWSTR                InstanceName,    // 输入：session 名（要 UTF-16）
+#       _Inout_ PEVENT_TRACE_PROPERTIES Properties    // 输入输出：session 配置
+#   );
+#
+# 返回值：ERROR_SUCCESS(0) 成功，非 0 是 Win32 错误码（比如 5=权限不足，183=session 已存在）
 StartTraceW = advapi32.StartTraceW
 StartTraceW.restype = wt.ULONG
-StartTraceW.argtypes = [ctypes.POINTER(ctypes.c_uint64), wt.LPCWSTR, ctypes.c_void_p]
+StartTraceW.argtypes = [
+    ctypes.POINTER(ctypes.c_uint64),  # TraceHandle (out)  — TRACEHANDLE = ULONG64
+    wt.LPCWSTR,                       # InstanceName        — session 名字
+    ctypes.c_void_p,                  # Properties          — 变长结构体，用 void* 避开类型
+]
 
+
+# ControlTraceW — 停止 / 查询 / flush 一个已有 session
+# https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-controltracew
+#
+# 原型:
+#   ULONG ControlTraceW(
+#       _In_    TRACEHANDLE              TraceHandle,   // handle 或 0（后者用 name 找）
+#       _In_    LPCWSTR                  InstanceName,  // session 名字
+#       _Inout_ PEVENT_TRACE_PROPERTIES  Properties,    // 配置/输出
+#       _In_    ULONG                    ControlCode    // EVENT_TRACE_CONTROL_STOP/FLUSH/QUERY
+#   );
 ControlTraceW = advapi32.ControlTraceW
 ControlTraceW.restype = wt.ULONG
-ControlTraceW.argtypes = [ctypes.c_uint64, wt.LPCWSTR, ctypes.c_void_p, wt.ULONG]
+ControlTraceW.argtypes = [
+    ctypes.c_uint64,   # TraceHandle
+    wt.LPCWSTR,        # InstanceName
+    ctypes.c_void_p,   # Properties
+    wt.ULONG,          # ControlCode
+]
 
+
+# EnableTraceEx2 — 给已启动的 session 挂上 / 取下 provider 订阅
+# https://learn.microsoft.com/en-us/windows/win32/api/evntrace/nf-evntrace-enabletraceex2
+#
+# 原型:
+#   ULONG EnableTraceEx2(
+#       _In_ TRACEHANDLE                TraceHandle,        // 之前 StartTrace 返回的
+#       _In_ LPCGUID                    ProviderId,         // 要订阅的 provider GUID
+#       _In_ ULONG                      ControlCode,        // 1=启用, 0=禁用
+#       _In_ UCHAR                      Level,              // TRACE_LEVEL_*
+#       _In_ ULONGLONG                  MatchAnyKeyword,    // 位掩码：任意 bit 匹配就发
+#       _In_ ULONGLONG                  MatchAllKeyword,    // 位掩码：必须全部 bit 匹配才发
+#       _In_ ULONG                      Timeout,            // 0=异步立即返回
+#       _In_opt_ PENABLE_TRACE_PARAMETERS EnableParameters  // 过滤器等扩展参数，可 NULL
+#   );
+#
+# Match*Keyword 的过滤逻辑：
+#   如果 MatchAnyKeyword=0，等于不按 keyword 过滤（全接收）
+#   否则 event 的 keyword 位掩码要满足：
+#       (event_kw & MatchAnyKeyword) != 0  AND  (event_kw & MatchAllKeyword) == MatchAllKeyword
 EnableTraceEx2 = advapi32.EnableTraceEx2
 EnableTraceEx2.restype = wt.ULONG
 EnableTraceEx2.argtypes = [
-    ctypes.c_uint64, ctypes.POINTER(GUID), wt.ULONG,
-    ctypes.c_ubyte, ctypes.c_uint64, ctypes.c_uint64,
-    wt.ULONG, ctypes.c_void_p,
+    ctypes.c_uint64,          # TraceHandle
+    ctypes.POINTER(GUID),     # ProviderId
+    wt.ULONG,                 # ControlCode
+    ctypes.c_ubyte,           # Level
+    ctypes.c_uint64,          # MatchAnyKeyword
+    ctypes.c_uint64,          # MatchAllKeyword
+    wt.ULONG,                 # Timeout
+    ctypes.c_void_p,          # EnableParameters (optional)
 ]
 
 
@@ -384,8 +551,14 @@ class EtwFileSession:
 
     def get_stats(self) -> dict:
         """获取 session 当前统计"""
-        buf, props = _alloc_properties(self._session_name)
-        status = ControlTraceW(0, self._session_name, buf, EVENT_TRACE_CONTROL_QUERY)
+        # QUERY 时 Windows 会回填 LoggerName / LogFileName 字符串到 buffer 末尾，
+        # 必须多留 2KB 空间（session 名 + 文件名各 1024 wchar），否则报 234 (MORE_DATA)。
+        buf, props = _alloc_properties(
+            self._session_name, str(self._log_file.absolute())
+        )
+        status = ControlTraceW(
+            self._trace_handle.value, None, buf, EVENT_TRACE_CONTROL_QUERY,
+        )
         if status != 0:
             return {"error": status}
         p = props.contents

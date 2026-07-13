@@ -81,6 +81,33 @@ KERNEL_DISK_NEW = GUID("{C7BDE69A-E1E0-4177-B6EF-283AD1525271}")
 KERNEL_MEMORY = GUID("{D1D93EF7-E1F2-4F45-9943-03D245FE6C00}")
 
 
+# ============ IO 评估用扩展 Provider ============
+# 这些 provider 用于"事后重建"场景，广撒网抓无线鼠标断连、
+# 音频卡顿、Bluetooth 掉线等偶发问题。先跑 tests/io_estimate.py
+# 评估订阅它们后的持续 IO 速率，再决定是否进主 config。
+
+# USB 2.0 端口层（无线接收器 dongle 走这条路）
+USB_USBPORT = GUID("{C88A4EF5-D048-4013-9408-E04B7DB2814A}")
+
+# USB 3.0 集线器（新机型 dongle 走这条路）
+USB_USBHUB3 = GUID("{AC52AD17-CC01-4F85-8DF5-4DCE4333C99B}")
+
+# Bluetooth 协议栈（BLE 鼠标/耳机）
+BTH_PORT = GUID("{8A1F9517-3A8C-4A9E-A018-4F17A200F277}")
+
+# Bluetooth USB 传输层（BT 芯片本身的问题）
+BTH_USB = GUID("{33693E1D-246A-471B-83BE-3E75F47A832D}")
+
+# HID 类驱动（鼠标/键盘/手柄的 HID 数据流）
+INPUT_HIDCLASS = GUID("{6465DA78-E7A0-4F39-B084-8F53C7C30DC6}")
+
+# 音频子系统（音频卡顿、buffer underrun）
+KERNEL_AUDIO = GUID("{AE4BD3BE-F36F-45B6-8D21-BDD6FB832853}")
+
+# 系统电源事件（休眠/唤醒/电源计划切换）
+KERNEL_POWER = GUID("{331C3B3A-2005-44C2-AC5E-77220C37D6B4}")
+
+
 # ============ 事件 ID 常量 ============
 
 class ProcessEvents:
