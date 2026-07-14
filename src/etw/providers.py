@@ -107,6 +107,11 @@ KERNEL_AUDIO = GUID("{AE4BD3BE-F36F-45B6-8D21-BDD6FB832853}")
 # 系统电源事件（休眠/唤醒/电源计划切换）
 KERNEL_POWER = GUID("{331C3B3A-2005-44C2-AC5E-77220C37D6B4}")
 
+# USB 3.0 主控（xHCI），比 USBHUB3 更底层
+# 主要用途：抓 USB Selective Suspend 引起的 D-state 变化（省电挂起/唤醒）
+# 无线接收器卡顿最常见原因之一就是被挂起后唤醒延迟
+USB_USBXHCI = GUID("{30E1D284-5D88-459C-83FD-6345B39B19EC}")
+
 
 # ============ 事件 ID 常量 ============
 

@@ -26,7 +26,7 @@ else:
 
 def main():
     print("=" * 50)
-    print("  游戏系统监控工具 - 环境安装")
+    print("  win_status_checker - 环境安装")
     print("=" * 50)
     print()
 
@@ -75,9 +75,8 @@ def main():
     print("=" * 50)
     print("  安装完成！")
     print()
-    print("    python run.py          # 启动监控")
-    print("    python run.py --list   # 历史会话")
-    print("    python run.py --test   # 运行测试")
+    print("    python run.py                        # 启动监控（需管理员）")
+    print("    python -m src.analyze_snapshot       # 分析最新 snapshot")
     print("=" * 50)
 
 

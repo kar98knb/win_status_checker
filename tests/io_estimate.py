@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.logging_utils import tee_stdout
 from src.etw.session import EtwFileSession
 from src.etw.providers import (
     # 主 config 里已有的
@@ -32,7 +33,7 @@ from src.etw.providers import (
     KERNEL_PROCESSOR_POWER, KERNEL_PNP,
     KERNEL_DISK_NEW, KERNEL_MEMORY,
     # 新增候选
-    USB_USBPORT, USB_USBHUB3,
+    USB_USBPORT, USB_USBHUB3, USB_USBXHCI,
     BTH_PORT, BTH_USB,
     INPUT_HIDCLASS,
     KERNEL_AUDIO, KERNEL_POWER,
@@ -54,6 +55,7 @@ CANDIDATES = [
     # ---- 新增 ----
     (USB_USBPORT,            "USB-USBPORT"),
     (USB_USBHUB3,            "USB-USBHUB3"),
+    (USB_USBXHCI,            "USB-USBXHCI"),
     (BTH_PORT,               "BTH-BTHPORT"),
     (BTH_USB,                "BTH-BTHUSB"),
     (INPUT_HIDCLASS,         "Input-HIDCLASS"),
@@ -104,12 +106,16 @@ def main():
         print("✗ 需要管理员权限")
         sys.exit(1)
 
-    # INFO 级别，能看到 session 启动时"订阅 X/Y 个"的日志
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 重定向 stdout + stderr 到日志文件，方便离线查看
+    tee_stdout(output_dir / "io_estimate.log")
+
+    # INFO 级别，能看到 session 启动时"订阅 X/Y 个"的日志
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                        stream=sys.stdout)
     etl_path = output_dir / "io_estimate.etl"
     if etl_path.exists():
         etl_path.unlink()
