@@ -7,6 +7,12 @@
 # .etl 文件最大大小（MB），超过后循环覆盖（用于 File Session）
 ETL_MAX_SIZE_MB = 500
 
+# Buffer Session 内存环形 buffer 总大小（MB）
+# POC 实测 15s 广撒网 ≈ 29 MB 使用量，256 MB ≈ 2~3 分钟窗口
+# 内存宽裕的机器可以调大到 1024 MB（≈ 10 分钟窗口）
+# 调大不影响 IO——buffer 都在内核内存，只有 Ctrl+C flush 才写盘
+ETW_BUFFER_SIZE_MB = 256
+
 # 事件级别过滤: 1=Critical, 2=Error, 3=Warning, 4=Information, 5=Verbose
 # 默认 Information，保留有诊断价值的 Info 事件（进程启停、频率变化等）
 # 高频背景事件（DxgKrnl Present 等）用 event id 白名单单独过滤
@@ -22,9 +28,10 @@ ETW_LEVEL = 4
 #     - IO 极低（~50 KB/s），SSD 无感
 #     - 目的：蓝屏/hang 后重启，能从落盘的 .etl 复盘
 #
-#   Session B: Real-Time Consumer（纯内存 deque + Ctrl+C dump）
-#     - 广撒网订阅，事件通过 kernel → consumer → Python 内存环形
-#     - 零磁盘 IO（除了 Ctrl+C 时一次性 dump ~10 MB gzip）
+#   Session B: Buffering Mode（内核内存环形 + Ctrl+C flush 到 .etl）
+#     - 广撒网订阅，事件只在 kernel 内存 buffer 里循环，Python 完全不参与
+#     - 零磁盘 IO（除了 Ctrl+C 时 ControlTraceW(FLUSH) 一次性写 .etl）
+#     - 产物是合法 ETL 格式，WPA/tracerpt/xperf 都能直接开
 #     - 目的：用户感知卡顿时立即 Ctrl+C，拿到最近 N 分钟历史
 #
 # 两个 session 事件不重合，各司其职。
@@ -39,8 +46,9 @@ ETW_FILE_SESSION_PROVIDERS = [
     "TCPIP",            # 网络连接断开事件
 ]
 
-# --- Session B (Realtime Consumer) 订阅哪些 provider ---
-# 剩下所有需要广撒网的 provider，不落盘所以事件多点没关系
+# --- Session B (Buffering Mode) 订阅哪些 provider ---
+# 剩下所有需要广撒网的 provider，不落盘（内存环形），事件多点没关系
+# 变量名保留 REALTIME_ 前缀是历史遗留，语义就是"广撒网、Ctrl+C 快照"
 ETW_REALTIME_PROVIDERS = [
     "CPU-Power",        # CPU 频率/idle 状态变化，反映 CPU 状态
     "Kernel-Power",     # 系统电源事件（休眠/唤醒/温度）
@@ -267,11 +275,6 @@ ETW_KEYWORD_BLACKLIST = {
         # 保留: Endpoint, ConnectPath, ClosePath, Dropped, Diagnosis, Interface
     ],
 
-    # NDIS - 网卡链路层（如果订阅）
-    "NDIS": [
-        # NDIS 事件默认量不大，先不做黑名单
-    ],
-
     # Kernel-PnP - 设备即插即用（事件本来就少，无需过滤）
     "Kernel-PnP": [],
 
@@ -351,15 +354,3 @@ ETW_KEYWORD_BLACKLIST = {
 }
 
 
-# ============ 日志配置 ============
-
-LOG_DIR = "logs"
-LOG_MAX_SIZE_MB = 50
-LOG_BACKUP_COUNT = 5
-LOG_RETAIN_DAYS = 7
-
-
-# ============ 进程优先级 ============
-
-# "idle" / "below_normal" / "normal"
-PROCESS_PRIORITY = "below_normal"

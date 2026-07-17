@@ -76,7 +76,7 @@ def main():
     print("  安装完成！")
     print()
     print("    python run.py                        # 启动监控（需管理员）")
-    print("    python -m src.analyze_snapshot       # 分析最新 snapshot")
+    print("    Ctrl+C 停止 → 用 WPA 打开 logs\\runs\\<ts>\\snap.etl")
     print("=" * 50)
 
 

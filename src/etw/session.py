@@ -1,12 +1,10 @@
 """
 ETW Session 管理
 
-三种 session 模式：
-- EtwFileSession:     file mode circular，磁盘环形文件（关键低频事件长期落盘）
-- EtwRealtimeSession: real-time mode，事件推给用户态 consumer，零磁盘 IO
-                      （广撒网订阅，consumer 侧维护内存环形，Ctrl+C 时 dump）
-- EtwBufferSession:   buffering mode，仅内存 buffer，靠 crash dump 提取
-                      （目前没用，Save-EtwTraceSession 对它不生效）
+两种 session 模式：
+- EtwFileSession:   file mode circular，磁盘环形文件（关键低频事件长期落盘）
+- EtwBufferSession: buffering mode，仅内存环形 buffer，Ctrl+C 时 flush 到合法 .etl
+                    （零平时 IO，WPA 直接可开）
 """
 
 import ctypes
@@ -29,9 +27,8 @@ WNODE_FLAG_TRACED_GUID = 0x00020000
 
 # --- EVENT_TRACE_PROPERTIES.LogFileMode 位掩码（evntrace.h） ---
 EVENT_TRACE_FILE_MODE_SEQUENTIAL = 0x00000001  # 顺序写文件，写满就报错
-EVENT_TRACE_FILE_MODE_CIRCULAR   = 0x00000002  # 环形写文件，写满覆盖旧的（我们用这个）
-EVENT_TRACE_REAL_TIME_MODE       = 0x00000100  # 实时投递给 consumer，不写文件
-EVENT_TRACE_BUFFERING_MODE       = 0x00000400  # 只在内存 buffer 环形保留，不落盘
+EVENT_TRACE_FILE_MODE_CIRCULAR   = 0x00000002  # 环形写文件，写满覆盖旧的（用于 EtwFileSession）
+EVENT_TRACE_BUFFERING_MODE       = 0x00000400  # 只在内存 buffer 环形保留（用于 EtwBufferSession）
 
 # --- EnableTraceEx2 的 ControlCode 参数（evntrace.h） ---
 EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1  # 启用一个 provider（我们只用这一个）
@@ -333,6 +330,13 @@ def _alloc_properties(session_name: str, file_name: Optional[str] = None):
             file_name_bytes,
         )
 
+    # LoggerNameOffset 不能只指向预留的零内存；实际 session 名也要写入。
+    ctypes.memmove(
+        ctypes.addressof(buf) + props.contents.LoggerNameOffset,
+        ctypes.c_wchar_p(session_name),
+        session_name_bytes,
+    )
+
     return buf, props
 
 
@@ -342,20 +346,36 @@ def _stop_session(session_name: str):
     ControlTraceW(0, session_name, buf, EVENT_TRACE_CONTROL_STOP)
 
 
-# ============ Buffer Session（用于 hang 追溯，暂不使用）============
+# ============ Buffer Session（内存环形 + Ctrl+C flush 到 .etl）============
 
 class EtwBufferSession:
     """
     Buffering mode session。事件仅在内核内存环形 buffer 里循环，平时零磁盘 IO。
+    需要 snapshot 时调 flush_to_etl() —— Windows 会把当前 buffer 里的事件
+    一次性写到指定 .etl 文件，产物是合法 ETL 格式，WPA / tracerpt 直接可读。
 
-    需要 snapshot 到 .etl 文件时，用 Save-EtwTraceSession PowerShell cmdlet
-    （或底层的 MSFT_EtwTraceSession.Send CIM 方法）。
+    通路依据（官方文档 ControlTraceW → EVENT_TRACE_CONTROL_FLUSH）：
+        This can be used with an in-memory session (a session started with the
+        EVENT_TRACE_BUFFERING_MODE flag) to write the data from the trace to a
+        file.
+    只需要设 Wnode.BufferSize / Wnode.Guid / LoggerNameOffset / LogFileNameOffset。
+    等价于 tracelog.exe -flush -f Logfile 命令。
     """
 
     def __init__(self, session_name: str = "WinStatusCheckerBuffer",
-                 buffer_size_mb: int = 64):
+                 buffer_size_mb: int = 256,
+                 single_buffer_kb: int = 1024):
+        """
+        Args:
+            session_name: session 名
+            buffer_size_mb: 内存环形 buffer 总大小（MB）
+                默认 256 MB，足够扛几十分钟事件（按 POC 实测 15s ≈ 29 MB 使用量估算）
+            single_buffer_kb: 单个 buffer 大小（KB），ETW 最大 16 MB/buffer
+                默认 1024 KB，配合 total 算出 buffer 个数
+        """
         self._session_name = session_name
         self._buffer_size_mb = buffer_size_mb
+        self._single_buffer_kb = single_buffer_kb
         self._trace_handle = ctypes.c_uint64(0)
         self._props_buf = None
         self._filter_refs = []
@@ -370,13 +390,12 @@ class EtwBufferSession:
         """
         _stop_session(self._session_name)
 
-        single_buf_kb = 1024
-        num_buffers = self._buffer_size_mb * 1024 // single_buf_kb
+        num_buffers = self._buffer_size_mb * 1024 // self._single_buffer_kb
 
         self._props_buf, props = _alloc_properties(self._session_name)
         props.contents.Wnode.Flags = WNODE_FLAG_TRACED_GUID
         props.contents.Wnode.ClientContext = 1
-        props.contents.BufferSize = single_buf_kb
+        props.contents.BufferSize = self._single_buffer_kb
         props.contents.MinimumBuffers = num_buffers
         props.contents.MaximumBuffers = num_buffers
         props.contents.LogFileMode = EVENT_TRACE_BUFFERING_MODE
@@ -394,7 +413,8 @@ class EtwBufferSession:
 
         logger.info(
             f"[{self._session_name}] Buffering 已启动, "
-            f"{self._buffer_size_mb}MB 内存 buffer ({num_buffers} × 1024KB), level={level}"
+            f"{self._buffer_size_mb}MB 内存 buffer "
+            f"({num_buffers} × {self._single_buffer_kb}KB), level={level}"
         )
 
         enabled = 0
@@ -446,141 +466,56 @@ class EtwBufferSession:
             "free_buffers": p.FreeBuffers,
         }
 
-    def stop(self):
-        _stop_session(self._session_name)
-        logger.info(f"[{self._session_name}] 已停止")
-
-
-# ============ Realtime Session（事件推给用户态 consumer，零磁盘 IO）============
-
-class EtwRealtimeSession:
-    """
-    Real-time mode session。事件通过内核 buffer 实时推送给 consumer 线程，
-    不写任何磁盘文件。
-
-    用法：
-        1. session.start(providers)
-        2. 另开一个 consumer 线程用 EtwConsumer.process() 拉事件
-        3. Ctrl+C 时先 stop consumer 再 stop session
-
-    LogFileMode = EVENT_TRACE_REAL_TIME_MODE 让 Windows 知道这个 session
-    没有 .etl 文件，事件应该等 consumer 用 OpenTraceW+ProcessTrace 来拉。
-    """
-
-    def __init__(self, session_name: str = "WinStatusCheckerRealtime",
-                 buffer_size_kb: int = 128,
-                 min_buffers: int = 32, max_buffers: int = 64):
+    def flush_to_etl(self, target_etl: Path) -> tuple[bool, int]:
         """
-        Args:
-            session_name: session 名称
-            buffer_size_kb: 单个内核 buffer 大小（KB）
-            min_buffers / max_buffers: 内核 buffer 池上下限
-                buffer 少了 consumer 慢会丢事件；buffer 多了浪费内存
-                默认 128 KB × 32~64 = 4~8 MB 内核 buffer 池，足够扛
-                consumer 短暂卡顿（比如 GC / 内存分配）
-        """
-        self._session_name = session_name
-        self._buffer_size_kb = buffer_size_kb
-        self._min_buffers = min_buffers
-        self._max_buffers = max_buffers
-        self._trace_handle = ctypes.c_uint64(0)
-        self._props_buf = None
-        self._filter_refs = []
+        把当前内存 buffer 的事件一次性写到目标 .etl（合法 ETL 格式，WPA 直接可读）。
 
-    def start(self, providers, level: int = TRACE_LEVEL_INFORMATION) -> bool:
-        """
-        启动 real-time session。
+        Properties buffer 布局（按官方文档 EVENT_TRACE_CONTROL_FLUSH 的最小字段集）:
+            [EVENT_TRACE_PROPERTIES][LogFileName wchar_t[]][LoggerName wchar_t[]]
 
-        Args:
-            providers: [(guid, keyword, event_id_whitelist), ...] 与 EtwFileSession 一致
-            level: 事件级别过滤
-        """
-        _stop_session(self._session_name)
+        重点：用新分配的空 Properties，不要 reuse 之前 StartTrace/QUERY 的
+        （历史踩坑：reuse 后 patch LogFileNameOffset 会走 UPDATE 路径的验证，报 87）
 
-        self._props_buf, props = _alloc_properties(self._session_name)
+        Returns:
+            (success, status)。status=0 表示成功。
+        """
+        target_etl.parent.mkdir(parents=True, exist_ok=True)
+        file_path = str(target_etl.absolute())
+
+        wchar = ctypes.sizeof(ctypes.c_wchar)
+        file_bytes = (len(file_path) + 1) * wchar
+        name_bytes = (len(self._session_name) + 1) * wchar
+        buf_size = ctypes.sizeof(EVENT_TRACE_PROPERTIES) + file_bytes + name_bytes
+
+        buf = (ctypes.c_ubyte * buf_size)()
+        ctypes.memset(buf, 0, buf_size)
+        props = ctypes.cast(buf, ctypes.POINTER(EVENT_TRACE_PROPERTIES))
+
+        props.contents.Wnode.BufferSize = buf_size
         props.contents.Wnode.Flags = WNODE_FLAG_TRACED_GUID
-        props.contents.Wnode.ClientContext = 1  # QueryPerformanceCounter 时间戳
-        props.contents.BufferSize = self._buffer_size_kb
-        props.contents.MinimumBuffers = self._min_buffers
-        props.contents.MaximumBuffers = self._max_buffers
-        # 关键：只设 REAL_TIME_MODE，不带 FILE_MODE 的位；LogFileNameOffset 保持 0
-        props.contents.LogFileMode = EVENT_TRACE_REAL_TIME_MODE
-        props.contents.FlushTimer = 1
-
-        status = StartTraceW(
-            ctypes.byref(self._trace_handle),
-            self._session_name,
-            self._props_buf,
+        # LogFileName 紧跟结构体
+        log_offset = ctypes.sizeof(EVENT_TRACE_PROPERTIES)
+        props.contents.LogFileNameOffset = log_offset
+        ctypes.memmove(
+            ctypes.addressof(buf) + log_offset,
+            ctypes.c_wchar_p(file_path),
+            file_bytes,
         )
-        if status != 0:
-            logger.error(f"[{self._session_name}] StartTrace 失败: {status}")
-            if status == 5:
-                logger.error("  权限不足，需要管理员")
-            return False
-
-        logger.info(
-            f"[{self._session_name}] Real-time 已启动, "
-            f"buffer={self._buffer_size_kb}KB × {self._min_buffers}~{self._max_buffers}, "
-            f"level={level}"
+        # LoggerName 紧跟文件名
+        logger_offset = log_offset + file_bytes
+        props.contents.LoggerNameOffset = logger_offset
+        ctypes.memmove(
+            ctypes.addressof(buf) + logger_offset,
+            ctypes.c_wchar_p(self._session_name),
+            name_bytes,
         )
 
-        enabled = 0
-        for entry in providers:
-            if len(entry) == 2:
-                provider_guid, keyword = entry
-                event_id_whitelist = None
-            else:
-                provider_guid, keyword, event_id_whitelist = entry
-
-            enable_params_ptr = None
-            filter_info = ""
-            if event_id_whitelist:
-                # 复用 EtwFileSession 的 filter 构造逻辑
-                refs = EtwFileSession._build_event_id_filter(self, event_id_whitelist)
-                self._filter_refs.append(refs)
-                enable_params_ptr = ctypes.byref(refs["params"])
-                filter_info = f" event_id 白名单={event_id_whitelist}"
-
-            status = EnableTraceEx2(
-                self._trace_handle, ctypes.byref(provider_guid),
-                EVENT_CONTROL_CODE_ENABLE_PROVIDER, level,
-                keyword, 0, 0, enable_params_ptr,
-            )
-            if status == 0:
-                enabled += 1
-                logger.info(f"  订阅 {provider_guid} keyword=0x{keyword:x}{filter_info}")
-            else:
-                logger.warning(f"订阅失败: {provider_guid} 错误码={status}")
-
-        logger.info(f"[{self._session_name}] 订阅 {enabled}/{len(providers)} 个 provider")
-        return True
-
-    def get_stats(self) -> dict:
-        """获取 session 当前统计"""
-        buf, props = _alloc_properties(self._session_name)
-        status = ControlTraceW(
-            self._trace_handle.value, None, buf, EVENT_TRACE_CONTROL_QUERY,
-        )
-        if status != 0:
-            return {"error": status}
-        p = props.contents
-        return {
-            "buffers_written": p.BuffersWritten,
-            "events_lost": p.EventsLost,
-            "log_buffers_lost": p.LogBuffersLost,
-            "realtime_buffers_lost": p.RealTimeBuffersLost,
-            "number_of_buffers": p.NumberOfBuffers,
-            "free_buffers": p.FreeBuffers,
-        }
+        status = ControlTraceW(0, self._session_name, buf, EVENT_TRACE_CONTROL_FLUSH)
+        return status == 0, status
 
     def stop(self):
         _stop_session(self._session_name)
         logger.info(f"[{self._session_name}] 已停止")
-
-    @property
-    def session_name(self) -> str:
-        """consumer 需要用这个名字 OpenTraceW"""
-        return self._session_name
 
 
 # ============ File Session（用于关键事件流水日志）============
